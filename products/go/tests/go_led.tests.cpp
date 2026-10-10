@@ -42,12 +42,26 @@ public:
   IMPLEMENT_MOCK0(init);
   IMPLEMENT_MOCK2(set_channel);
   IMPLEMENT_MOCK4(set_rgb);
+  IMPLEMENT_MOCK0(standby);
 };
 
 class LedServiceTestAccess {
 public:
   static uint32_t next_wait_timeout_ms(const LedService &service, uint32_t now_ms) {
     return service._next_wait_timeout_ms(now_ms);
+  }
+
+  /// Pretend a worker task is running so shutdown() takes the queued path.
+  /// The handle is never dereferenced; task_delete() is a no-op on host.
+  static void fake_worker(LedService &service) {
+    static int fake_task_storage = 0;
+    service._task = reinterpret_cast<RtosTaskHandle>(&fake_task_storage);
+  }
+
+  /// Pop the worker's shutdown confirmation, if one was posted.
+  static bool take_shutdown_ack(LedService &service) {
+    uint8_t ack = 0;
+    return RTOS::queue_receive(service._ack_queue, &ack, 0);
   }
 };
 
@@ -1053,4 +1067,113 @@ TEST_CASE("LedService: auto-restore from Off", "[LedService][back][restore]") {
   REQUIRE_CALL(f.driver, set_rgb(18, 0, 0, 0)).RETURN(true);
   REQUIRE_CALL(f.driver, set_rgb(24, 0, 0, 0)).RETURN(true);
   f.svc->pump_for_test(200);
+}
+
+// ============================================================================
+// Shutdown
+// ============================================================================
+
+TEST_CASE("LedService: shutdown", "[LedService][shutdown]") {
+  TestFixture f;
+  f.build();
+
+  // Light back and touch LEDs so shutdown has something to turn off.
+  f.svc->back_set_brightness(LedBrightness::Bright);
+  f.svc->back_blink({255, 0, 0}, 1000);
+  f.svc->touch_set_intensity(TouchLedIntensity::Bright);
+  f.svc->touch_set_all(true);
+  {
+    ALLOW_CALL(f.driver, set_rgb(trompeloeil::_, trompeloeil::_, trompeloeil::_, trompeloeil::_))
+        .RETURN(true);
+    f.svc->pump_for_test(0);
+  }
+
+  SECTION("without a worker: every LED dark, then standby, inline") {
+    {
+      trompeloeil::sequence seq;
+      // Back LEDs (blue-channel bases) then touch pads, all off.
+      REQUIRE_CALL(f.driver, set_rgb(6, 0, 0, 0)).IN_SEQUENCE(seq).RETURN(true);
+      REQUIRE_CALL(f.driver, set_rgb(12, 0, 0, 0)).IN_SEQUENCE(seq).RETURN(true);
+      REQUIRE_CALL(f.driver, set_rgb(15, 0, 0, 0)).IN_SEQUENCE(seq).RETURN(true);
+      REQUIRE_CALL(f.driver, set_rgb(18, 0, 0, 0)).IN_SEQUENCE(seq).RETURN(true);
+      REQUIRE_CALL(f.driver, set_rgb(24, 0, 0, 0)).IN_SEQUENCE(seq).RETURN(true);
+      REQUIRE_CALL(f.driver, set_rgb(27, 0, 0, 0)).IN_SEQUENCE(seq).RETURN(true); // Select
+      REQUIRE_CALL(f.driver, set_rgb(3, 0, 0, 0)).IN_SEQUENCE(seq).RETURN(true);  // Left
+      REQUIRE_CALL(f.driver, set_rgb(0, 0, 0, 0)).IN_SEQUENCE(seq).RETURN(true);  // Right
+      REQUIRE_CALL(f.driver, standby()).IN_SEQUENCE(seq).RETURN(true);
+      f.svc->shutdown();
+    }
+
+    // The blink effect is cancelled and new commands are dropped: no driver
+    // writes on later pumps, even well past a blink half-period.
+    f.svc->back_solid({0, 255, 0});
+    f.svc->touch_flash(TouchPad::Left);
+    f.svc->pump_for_test(5000);
+  }
+
+  SECTION("with a worker: queued request applied by the worker, then acked") {
+    LedServiceTestAccess::fake_worker(*f.svc);
+    f.svc->back_solid({0, 0, 255}); // queued before shutdown: processed first
+
+    // No driver access from the caller's context.
+    f.svc->shutdown();
+    CHECK_FALSE(LedServiceTestAccess::take_shutdown_ack(*f.svc));
+
+    {
+      REQUIRE_CALL(f.driver, set_rgb(trompeloeil::_, 0, 0, 0)).TIMES(8).RETURN(true);
+      REQUIRE_CALL(f.driver, standby()).RETURN(true);
+      f.svc->pump_for_test(10);
+    }
+    CHECK(LedServiceTestAccess::take_shutdown_ack(*f.svc));
+
+    // Parked: later commands never reach the driver.
+    f.svc->back_solid({255, 255, 255});
+    f.svc->pump_for_test(20);
+  }
+
+  SECTION("idempotent: second call does nothing") {
+    {
+      REQUIRE_CALL(f.driver, set_rgb(trompeloeil::_, 0, 0, 0)).TIMES(8).RETURN(true);
+      REQUIRE_CALL(f.driver, standby()).RETURN(true);
+      f.svc->shutdown();
+    }
+    f.svc->shutdown();
+  }
+
+  SECTION("driver failures are logged, not retried") {
+    {
+      REQUIRE_CALL(f.driver, set_rgb(trompeloeil::_, 0, 0, 0)).TIMES(8).RETURN(false);
+      REQUIRE_CALL(f.driver, standby()).RETURN(false);
+      f.svc->shutdown();
+    }
+    f.svc->pump_for_test(5000);
+  }
+}
+
+TEST_CASE("LedService: shutdown edge cases", "[LedService][shutdown]") {
+  SECTION("inert mode: no-op") {
+    LedService::Config cfg{};
+    cfg.driver = nullptr;
+    LedService svc(cfg);
+    CHECK(svc.init());
+    CHECK(svc.start());
+    svc.shutdown();
+  }
+
+  SECTION("before init: no driver access") {
+    MockLedDriver driver;
+    LedService::Config cfg{};
+    cfg.driver = &driver;
+    LedService svc(cfg);
+    svc.shutdown();
+  }
+
+  SECTION("default LedDriver::standby succeeds") {
+    struct MinimalDriver : LedDriver {
+      bool init() override { return true; }
+      bool set_channel(uint8_t, uint8_t) override { return true; }
+      bool set_rgb(uint8_t, uint8_t, uint8_t, uint8_t) override { return true; }
+    } driver;
+    CHECK(driver.standby());
+  }
 }

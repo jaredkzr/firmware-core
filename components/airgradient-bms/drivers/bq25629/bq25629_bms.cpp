@@ -339,6 +339,16 @@ bool BQ25629Bms::set_charge_enable(bool enabled) {
   return true;
 }
 
+bool BQ25629Bms::set_adc_enabled(bool enabled) {
+  esp_err_t err = _charger.enable_adc(enabled, /*continuous=*/true);
+  if (err != ESP_OK) {
+    ESP_LOGW(TAG, "set_adc_enabled(%s) failed: %s", enabled ? "true" : "false",
+             esp_err_to_name(err));
+    return false;
+  }
+  return true;
+}
+
 bool BQ25629Bms::set_charge_current_ma(uint16_t current_ma) {
   esp_err_t err = _charger.set_charge_current(current_ma);
   if (err != ESP_OK) {

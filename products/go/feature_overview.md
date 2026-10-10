@@ -58,6 +58,12 @@ and connectivity features are active.
 
 The default mode on a fresh device is Portable.
 
+Portable mode has an optional **Portable Sleep** setting (off by default). When
+it is on and no phone is connected, the locked device sleeps between
+measurements to save battery. While it sleeps, the phone app cannot see it.
+Pressing the power button wakes it, and the paired phone reconnects. When a
+phone is connected, the device stays awake and streams live readings as usual.
+
 ## Tracking And Route Logging
 
 Tracking is one of the key Go features. While recording, the device

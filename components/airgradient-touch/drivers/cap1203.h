@@ -79,10 +79,17 @@ public:
   // Call this from the interrupt handler or after processing a touch event.
   bool clear_interrupt() override;
 
+  // Sets MAIN_CONTROL DSLEEP (bit 4): all sensing stops and the chip draws
+  // its deep-sleep current while staying I2C-accessible. init() clears
+  // DSLEEP and STBY again. Returns false on I2C failure.
+  bool deep_sleep() override;
+
 private:
   bool _read_reg(uint8_t reg, uint8_t &out);
   bool _write_reg(uint8_t reg, uint8_t val);
   bool _apply_config();
+  // Clears MAIN_CONTROL DSLEEP and STBY if either is set.
+  bool _exit_low_power();
   void _rm_device();
 
   i2c_master_bus_handle_t _i2c_bus;
@@ -106,6 +113,11 @@ private:
   static constexpr uint8_t REG_PRODUCT_ID = 0xFD;
   static constexpr uint8_t REG_MANUFACTURER_ID = 0xFE;
   static constexpr uint8_t REG_REVISION = 0xFF;
+
+  // MAIN_CONTROL (0x00) bits: GAIN[7:6], STBY[5], DSLEEP[4], INT[0].
+  static constexpr uint8_t MAIN_CONTROL_STBY = 0x20;
+  static constexpr uint8_t MAIN_CONTROL_DSLEEP = 0x10;
+  static constexpr uint8_t MAIN_CONTROL_INT = 0x01;
 
   // Expected identity values
   static constexpr uint8_t EXPECTED_PRODUCT_ID = 0x6D;

@@ -18,6 +18,7 @@
 #include "go_led_types.h"
 #include "rtos.h"
 
+#include <atomic>
 #include <cstdint>
 #include <optional>
 
@@ -30,6 +31,9 @@ public:
     uint8_t queue_depth = 8;
     uint32_t touch_flash_ms = 120;
     uint32_t frame_interval_ms = 30; // ~33 fps when animating
+    // shutdown(): max wait to enqueue the request and again for the worker
+    // to confirm it. Covers one in-flight frame of I2C writes.
+    uint32_t shutdown_timeout_ms = 500;
   };
 
   explicit LedService(const Config &config);
@@ -40,6 +44,19 @@ public:
 
   bool init();
   bool start();
+
+  /// Turn every LED (back and touch) off, cancel all effects, and put the
+  /// driver in standby, before deep sleep or power-off.
+  ///
+  /// Synchronous. With a running worker the request goes through the command
+  /// queue so only the worker touches the driver; the caller waits up to
+  /// Config::shutdown_timeout_ms for the enqueue and again for the worker's
+  /// confirmation, logging a warning on timeout instead of blocking. The
+  /// worker then parks and never writes to the driver again. Without a
+  /// worker (start() not called) it runs inline. Every later command is
+  /// dropped; the LEDs stay dark until the next boot calls init(), which
+  /// re-enables the driver. Idempotent. Do not call from the LED task.
+  void shutdown();
 
   // --- Back (animated) ---
   void back_solid(Rgb color);
@@ -99,6 +116,7 @@ private:
       TouchFlash,
       TouchSetAll,
       TouchSetIntensity,
+      Shutdown,
     };
 
     Kind kind;
@@ -146,6 +164,7 @@ private:
   void _render_touch();
   bool _is_back_static() const;
   uint32_t _next_wait_timeout_ms(uint32_t now_ms) const;
+  void _apply_shutdown();
 
   Rgb _compute_back_frame(uint32_t now_ms);
   Rgb _compute_primitive_frame(BackEffectState::Type type, Rgb color, uint32_t param_ms,
@@ -166,6 +185,7 @@ private:
 
   static void _task_entry(void *arg);
   void _run();
+  [[noreturn]] void _park();
 
   // -----------------------------------------------------------------------
   // State
@@ -199,7 +219,13 @@ private:
   // Driver error tracking (edge-triggered logging)
   bool _driver_error_logged = false;
 
+  // Shutdown: requested flag is set by the caller and gates _enqueue(); the
+  // worker sets _shut_down once LEDs are dark and the driver is in standby.
+  std::atomic<bool> _shutdown_requested{false};
+  bool _shut_down = false;
+
   RtosQueueHandle _queue = nullptr;
+  RtosQueueHandle _ack_queue = nullptr; // worker -> shutdown() confirmation
   RtosTaskHandle _task = nullptr;
 
   // -----------------------------------------------------------------------

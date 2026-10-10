@@ -346,7 +346,7 @@ iterate, so OTA is mutually exclusive with every queue-driven activity. See
 ### Sensor Producer
 
 Wraps the shared `SensorManager` from `components/airgradient-sensors/`.
-In Portable and Stationary modes (always-awake), the producer also drives
+While the device is awake in Portable or Stationary mode, the producer also drives
 a gas-index sampler that feeds the Sensirion algorithm at a fixed cadence
 (default 10 s) independent of the measurement interval.
 
@@ -380,8 +380,9 @@ from deep sleep is configured. See [Accelerometer Service](docs/accel_service.md
 ### Gas Index in Offline Mode
 
 TVOC and NOx index values (Sensirion SGP41 gas-index algorithm) are only
-available in Portable and Stationary modes. In Offline mode, the display
-shows raw SRAW ticks instead of index values.
+available while the device stays awake in Portable or Stationary mode. During
+deep-sleep cycles (Offline, or Portable with Portable Sleep enabled) the
+display shows raw SRAW ticks instead of index values.
 
 **Why the algorithm cannot run across deep-sleep cycles:**
 
@@ -542,8 +543,10 @@ regular measurement or cloud-post timers. See
 
 Sleep is only eligible when:
 
-- The operating mode is **Offline** (Portable and Stationary never sleep), and
-- The device is **locked** (never sleep while user is interacting with menus).
+- The operating mode is **Offline**, or **Portable** with the Portable Sleep
+  setting enabled and no BLE central connected (Stationary never sleeps), and
+- The device is **locked** (never sleep while user is interacting with menus), and
+- No measurement, user refresh, or PM sleep command is in flight.
 
 ### Sleep Type Selection
 
@@ -572,7 +575,10 @@ configured interval.
 1. Final display update (wait=true — ensures the e-paper refresh completes)
 2. Save RTC display snapshot (sensor values, battery, status flags,
    rendering settings) so the next button wake can render immediately
-3. Stop all task-based services (BLE, sensor, GPS, input, display worker)
+3. Shut down the LEDs (LP5036 standby) and stop all task-based services
+   (BLE, sensor, GPS, input, display worker). GNSS keeps tracking only for an
+   active tracking session; otherwise it is stopped. On a cold sleep (PM not
+   held warm) the CO2, TVOC/NOx, and pressure sensors are idled
 4. Put SSD1680 into deep sleep mode 1 (~100 µA → <1 µA during ESP deep sleep)
 5. Backup chart cache to RTC memory
 6. Persist app state to RTC memory:

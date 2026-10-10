@@ -52,6 +52,12 @@ public:
   bool set_charge_current_ma(uint16_t current_ma) override;
   bool set_watchdog_timeout_ms(uint32_t timeout_ms) override;
 
+  /// Write ADC_CONTROL (REG0x26): ADC_EN=1 with ADC_RATE=0 (continuous) when
+  /// enabled, or 0x00 (ADC off) when disabled.  The vendor init() enables
+  /// continuous conversion on every boot (config.enable_adc), and
+  /// read_adc() re-enables it if found off.
+  bool set_adc_enabled(bool enabled) override;
+
 private:
   /// Apply the full PMID configuration sequence:
   ///   HIZ off -> TS check on -> VOTG=5100 -> EN_BYPASS_OTG=0 -> EN_OTG=1

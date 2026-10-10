@@ -547,6 +547,7 @@ Read the characteristic to receive the full device configuration.
 | `"bled"` | uint | Back (AQI) LED brightness: 0=Off, 1=Dim, 2=Mid, 3=Bright |
 | `"tled"` | uint | Touch LED intensity: 0=Off, 1=Dim, 2=Bright |
 | `"buz"` | bool | Buzzer enabled |
+| `"port_sleep"` | bool | Portable sleep between samples. When `true`, a locked Portable device with no central connected deep-sleeps between measurements and stops advertising; it reappears after the user unlocks it |
 | `"abc"` | int | CO2 ABC period: `-1` disables, otherwise 1–200 days |
 | `"tlo"` | uint | TVOC learning-time offset: 1–1000 hours |
 | `"nlo"` | uint | NOx learning-time offset: 1–1000 hours |
@@ -598,6 +599,7 @@ them and persisted loading canonicalizes them.
   "bled": 3,
   "tled": 2,
   "buz": true,
+  "port_sleep": false,
   "abc": 7,
   "tlo": 12,
   "nlo": 12,
@@ -644,6 +646,7 @@ silently ignored for backward compatibility. They do not modify any setting.
 | `"bled"` | uint | 0–3 (back LED brightness) |
 | `"tled"` | uint | 0–2 (touch LED intensity) |
 | `"buz"` | bool | Buzzer enabled |
+| `"port_sleep"` | bool | Portable sleep between samples |
 | `"abc"` | int | `-1` disables ABC; otherwise 1–200 days |
 | `"tlo"` | uint | 1–1000 hours |
 | `"nlo"` | uint | 1–1000 hours |

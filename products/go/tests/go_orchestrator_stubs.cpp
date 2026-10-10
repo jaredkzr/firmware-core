@@ -253,6 +253,10 @@ RtcAppState last_saved_state{};
 RtcAppState state_to_load{};        // tests set this before init(Button)
 PowerSnapshot snapshot_to_return{}; // tests set this before poll_bms
 PowerService::SleepType sleep_type_to_return = PowerService::SleepType::None;
+int decide_sleep_call_count = 0;
+bool last_decide_sleep_ble_link = false;
+int led_shutdown_count = 0;
+int sensor_idle_for_sleep_count = 0;
 bool pm_power_set = false;
 bool pm_power_on = false;
 uint32_t pm_power_set_count = 0;
@@ -452,6 +456,10 @@ void reset() {
   state_to_load = RtcAppState{};
   snapshot_to_return = PowerSnapshot{};
   sleep_type_to_return = PowerService::SleepType::None;
+  decide_sleep_call_count = 0;
+  last_decide_sleep_ble_link = false;
+  led_shutdown_count = 0;
+  sensor_idle_for_sleep_count = 0;
   pm_power_set = false;
   pm_power_on = false;
   pm_power_set_count = 0;
@@ -491,6 +499,8 @@ void SensorProducer::stop(bool sleep_pm) {
   test_spy::sensor_stopped = true;
   test_spy::sensor_stop_sleep_pm = sleep_pm;
 }
+
+void SensorProducer::idle_sensors_for_sleep() { ++test_spy::sensor_idle_for_sleep_count; }
 
 void SensorProducer::request_measurement(uint8_t iterations, SensorGroup groups,
                                          MeasurementOrigin origin) {
@@ -754,7 +764,10 @@ RtcAppState PowerService::load_state() const { return test_spy::state_to_load; }
 PowerService::SleepDecision PowerService::decide_sleep(const GoSettings & /*settings*/,
                                                        LockState /*lock_state*/,
                                                        OperatingMode /*mode*/,
-                                                       uint32_t /*awake_ms*/) const {
+                                                       uint32_t /*awake_ms*/,
+                                                       bool ble_link_active) const {
+  ++test_spy::decide_sleep_call_count;
+  test_spy::last_decide_sleep_ble_link = ble_link_active;
   return {test_spy::sleep_type_to_return, 10000};
 }
 
@@ -1307,6 +1320,7 @@ void LedService::back_breathe(Rgb /*color*/, uint32_t /*period_ms*/) {}
 void LedService::back_fade_to(Rgb /*color*/, uint32_t /*duration_ms*/) {}
 void LedService::back_chase(Rgb /*color*/, uint32_t /*step_ms*/) {}
 void LedService::back_off() {}
+void LedService::shutdown() { ++test_spy::led_shutdown_count; }
 void LedService::back_set_brightness(LedBrightness brightness) {
   ++test_spy::led_back_brightness_count;
   test_spy::led_last_back_brightness = brightness;

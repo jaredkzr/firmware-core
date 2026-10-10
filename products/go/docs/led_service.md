@@ -49,6 +49,7 @@ variant.
 | `queue_depth` | `uint8_t` | 8 | Command queue capacity |
 | `touch_flash_ms` | `uint32_t` | 120 | Touch flash duration |
 | `frame_interval_ms` | `uint32_t` | 30 | Frame tick interval (~33 fps) |
+| `shutdown_timeout_ms` | `uint32_t` | 500 | `shutdown()` wait for the enqueue and again for the worker's confirmation |
 
 ### Lifecycle
 
@@ -56,6 +57,7 @@ variant.
 |---|---|---|
 | `init()` | `bool` | Init driver, create queue. Cached: second call returns first result. |
 | `start()` | `bool` | Spawn worker task. Idempotent. |
+| `shutdown()` | `void` | Synchronous: all LEDs off, effects cancelled, driver in standby. Later commands are dropped. Idempotent. |
 
 ### Back (Animated)
 
@@ -278,6 +280,26 @@ out-of-range values are silently rejected. Settings are applied
 at boot in `Orchestrator::init()` and immediately on UI change in
 `apply_settings_change()`.
 
+### Shutdown
+
+`shutdown()` runs before deep sleep or power-off. It sets a flag that makes
+every later public call a no-op, then:
+
+- **Worker running:** enqueues a `Shutdown` command (commands already queued
+  run first) and waits up to `shutdown_timeout_ms` for the worker to confirm
+  through a one-slot ack queue. The worker writes all five back and three
+  touch RGB groups to zero, calls `LedDriver::standby()`, acks, and parks on
+  its command queue, never touching the driver again. Driver access stays on
+  the worker task, so there is no lock and no deadlock. A timeout only logs
+  a warning.
+- **No worker** (`start()` not called or task creation failed): the same
+  steps run inline on the caller's task.
+
+`LP5036::standby()` writes `DEVICE_CONFIG0 = 0x00`, clearing Chip_EN
+(bit 6). `LP5036::init()` writes Chip_EN again and zeroes all 36 outputs on
+the next boot. Boot paths that never create the LED service leave the chip
+in standby.
+
 ## Inert Mode
 
 When `Config::driver == nullptr`:
@@ -299,6 +321,8 @@ The LP5036 `.cpp` is not linked into host tests.
   first failure WARN, first recovery INFO) and not retried. The dirty
   flag is cleared unconditionally to avoid busy-looping on a faulty bus.
 - **Queue full**: Enqueue is dropped silently. The next call re-syncs.
+- **Shutdown queue full or no ack**: `shutdown()` logs a warning after
+  `shutdown_timeout_ms` and returns; it never blocks sleep entry.
 - **Mutators before init/start**: All are no-ops. No crash, no queue
   access.
 - **Fade from Chase**: `_last_rendered_back` stores the chase base color

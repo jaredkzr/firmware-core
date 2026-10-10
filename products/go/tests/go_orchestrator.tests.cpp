@@ -131,6 +131,10 @@ extern RtcAppState last_saved_state;
 extern RtcAppState state_to_load;
 extern PowerSnapshot snapshot_to_return;
 extern PowerService::SleepType sleep_type_to_return;
+extern int decide_sleep_call_count;
+extern bool last_decide_sleep_ble_link;
+extern int led_shutdown_count;
+extern int sensor_idle_for_sleep_count;
 extern bool pm_power_set;
 extern bool pm_power_on;
 extern uint32_t pm_power_set_count;
@@ -618,6 +622,8 @@ public:
   static void prepare_for_sleep(Orchestrator &o, uint32_t sleep_ms = 60000) {
     o.prepare_for_sleep(sleep_ms);
   }
+  static void try_enter_sleep(Orchestrator &o) { o.try_enter_sleep(); }
+  static void set_measurement_pending(Orchestrator &o, bool v) { o._measurement_pending = v; }
   static void set_mode(Orchestrator &o, OperatingMode mode) {
     o._mode = mode;
     o._settings.operating_mode = mode;
@@ -634,6 +640,10 @@ public:
   static void sensor_asleep(Orchestrator &o) {
     sensor_ready(o);
     o._pm_state = Orchestrator::PmState::Asleep;
+  }
+  static void sensor_preparing(Orchestrator &o) {
+    sensor_ready(o);
+    o._pm_state = Orchestrator::PmState::Preparing;
   }
   static void sensor_sleeping(Orchestrator &o) {
     sensor_ready(o);
@@ -6578,6 +6588,7 @@ TEST_CASE("prepare_for_sleep: short sleep keeps PM measuring and saves warm stat
           "[Orchestrator][sleep][pm]") {
   TestFixture f;
   auto orch = f.make_orchestrator();
+  A::sensor_ready(orch);
 
   test_spy::hold_pm_sensor_to_return = true;
 
@@ -6587,6 +6598,40 @@ TEST_CASE("prepare_for_sleep: short sleep keeps PM measuring and saves warm stat
   CHECK_FALSE(test_spy::sensor_stop_sleep_pm);
   CHECK(test_spy::state_saved);
   CHECK(test_spy::last_saved_state.has_flag(RtcAppFlag::SensorsWarm));
+  // Warm wake reattaches to the running sensors, so they are not idled.
+  CHECK(test_spy::sensor_idle_for_sleep_count == 0);
+  CHECK(test_spy::led_shutdown_count == 1);
+}
+
+TEST_CASE("prepare_for_sleep: preparing PM is awake and may be held warm",
+          "[Orchestrator][sleep][pm]") {
+  TestFixture f;
+  auto orch = f.make_orchestrator();
+  A::sensor_preparing(orch);
+
+  test_spy::hold_pm_sensor_to_return = true;
+
+  A::prepare_for_sleep(orch, 10000);
+
+  CHECK_FALSE(test_spy::sensor_stop_sleep_pm);
+  CHECK(test_spy::last_saved_state.has_flag(RtcAppFlag::SensorsWarm));
+}
+
+TEST_CASE("prepare_for_sleep: PM already asleep is never saved as warm",
+          "[Orchestrator][sleep][pm]") {
+  TestFixture f;
+  auto orch = f.make_orchestrator();
+  // Portable duty-cycling put the SPS30 to sleep before the deep sleep began.
+  A::sensor_asleep(orch);
+
+  test_spy::hold_pm_sensor_to_return = true; // short sleep would otherwise hold
+
+  A::prepare_for_sleep(orch, 10000);
+
+  CHECK(test_spy::sensor_stopped);
+  CHECK_FALSE(test_spy::sensor_stop_sleep_pm); // already asleep; no second command
+  CHECK_FALSE(test_spy::last_saved_state.has_flag(RtcAppFlag::SensorsWarm));
+  CHECK(test_spy::sensor_idle_for_sleep_count == 1);
 }
 
 TEST_CASE("prepare_for_sleep: long sleep sleeps PM and saves cold state",
@@ -6594,6 +6639,7 @@ TEST_CASE("prepare_for_sleep: long sleep sleeps PM and saves cold state",
   TestFixture f;
   auto orch = f.make_orchestrator();
 
+  A::sensor_ready(orch);
   test_spy::hold_pm_sensor_to_return = false;
 
   A::prepare_for_sleep(orch, 60000);
@@ -6602,6 +6648,84 @@ TEST_CASE("prepare_for_sleep: long sleep sleeps PM and saves cold state",
   CHECK(test_spy::sensor_stop_sleep_pm);
   CHECK(test_spy::state_saved);
   CHECK_FALSE(test_spy::last_saved_state.has_flag(RtcAppFlag::SensorsWarm));
+  // Cold wake re-initializes every sensor, so the always-powered ones are idled.
+  CHECK(test_spy::sensor_idle_for_sleep_count == 1);
+  CHECK(test_spy::led_shutdown_count == 1);
+}
+
+TEST_CASE("prepare_for_sleep: AlwaysOn GPS without a tracking session idles GNSS",
+          "[Orchestrator][sleep][gps]") {
+  TestFixture f;
+  auto orch = f.make_orchestrator();
+  A::settings(orch).gps_mode = GpsMode::AlwaysOn;
+
+  A::prepare_for_sleep(orch);
+
+  // The fast path reads GPS only for an active session, so nothing would
+  // consume a fix during this sleep.
+  CHECK(test_spy::gps_stop_and_idle_called);
+}
+
+TEST_CASE("try_enter_sleep: waits for in-flight reads and PM transitions",
+          "[Orchestrator][sleep]") {
+  TestFixture f;
+  auto orch = f.make_orchestrator();
+  test_spy::sleep_type_to_return = PowerService::SleepType::Deep;
+
+  SECTION("measurement pending") {
+    A::sensor_ready(orch);
+    A::set_measurement_pending(orch, true);
+    A::try_enter_sleep(orch);
+    CHECK(test_spy::decide_sleep_call_count == 0);
+    CHECK_FALSE(test_spy::sensor_stopped);
+
+    A::set_measurement_pending(orch, false);
+    A::try_enter_sleep(orch);
+    CHECK(test_spy::decide_sleep_call_count == 1);
+    CHECK(test_spy::sensor_stopped);
+  }
+
+  SECTION("PM preparing (boot warmup after fast-path promotion) may sleep") {
+    A::sensor_preparing(orch);
+    A::try_enter_sleep(orch);
+    CHECK(test_spy::decide_sleep_call_count == 1);
+  }
+
+  SECTION("PM going to sleep") {
+    A::sensor_sleeping(orch);
+    A::try_enter_sleep(orch);
+    CHECK(test_spy::decide_sleep_call_count == 0);
+  }
+
+  SECTION("PM asleep is a stable state") {
+    A::sensor_asleep(orch);
+    A::try_enter_sleep(orch);
+    CHECK(test_spy::decide_sleep_call_count == 1);
+  }
+}
+
+TEST_CASE("try_enter_sleep: reports an active BLE link to the sleep decision",
+          "[Orchestrator][sleep][ble]") {
+  TestFixture f;
+  auto orch = f.make_orchestrator();
+  A::sensor_ready(orch);
+  test_spy::sleep_type_to_return = PowerService::SleepType::None;
+
+  SECTION("no link") {
+    A::try_enter_sleep(orch);
+    CHECK_FALSE(test_spy::last_decide_sleep_ble_link);
+  }
+  SECTION("central connected") {
+    test_spy::ble_connected = true;
+    A::try_enter_sleep(orch);
+    CHECK(test_spy::last_decide_sleep_ble_link);
+  }
+  SECTION("BLE OTA running") {
+    test_spy::ota_is_ble_active = true;
+    A::try_enter_sleep(orch);
+    CHECK(test_spy::last_decide_sleep_ble_link);
+  }
+  CHECK_FALSE(test_spy::sensor_stopped);
 }
 
 TEST_CASE("prepare_for_sleep: flushes and closes route file when tracking is active",
@@ -7914,7 +8038,7 @@ TEST_CASE("stop_tracking: AlwaysOn mode does not stop GPS", "[Orchestrator][gps_
   CHECK_FALSE(test_spy::gps_stop_and_idle_called);
 }
 
-TEST_CASE("prepare_for_sleep: active GPS calls stop (no GNSS stop)",
+TEST_CASE("prepare_for_sleep: active GPS with a tracking session calls stop (no GNSS stop)",
           "[Orchestrator][gps_sync][sleep]") {
   TestFixture f;
   f.settings.gps_mode = GpsMode::AlwaysOn;
@@ -7928,6 +8052,10 @@ TEST_CASE("prepare_for_sleep: active GPS calls stop (no GNSS stop)",
       .RETURN(ConfigStoreResult::NOT_FOUND);
 
   orch.init(WakeCause::PowerOn);
+  // The fast path reads GPS only during a tracking session; only then is
+  // keeping GNSS tracking through sleep worth its current.
+  A::start_tracking(orch);
+  REQUIRE(A::tracking_active(orch));
   test_spy::reset();
 
   A::prepare_for_sleep(orch);

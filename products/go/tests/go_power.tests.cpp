@@ -57,6 +57,7 @@ public:
   IMPLEMENT_MOCK1(set_charge_enable);
   IMPLEMENT_MOCK1(set_charge_current_ma);
   IMPLEMENT_MOCK1(set_watchdog_timeout_ms);
+  IMPLEMENT_MOCK1(set_adc_enabled);
 
 private:
   std::unique_ptr<trompeloeil::expectation> default_charge_enable;
@@ -374,6 +375,29 @@ TEST_CASE("set_bms: attaches charger after degraded construction", "[PowerServic
   CHECK(svc.reset_watchdog());
 }
 
+TEST_CASE("enter_sleep: disables the BMS ADC before deep sleep", "[PowerService][sleep]") {
+  SECTION("ADC disabled on the attached BMS") {
+    MockBmsDevice mock_bms;
+    PowerService svc(&mock_bms, test_gpio_hal, DEFAULT_CONFIG);
+
+    REQUIRE_CALL(mock_bms, set_adc_enabled(false)).RETURN(true);
+    svc.enter_sleep(60000);
+  }
+
+  SECTION("ADC disable failure does not block sleep entry") {
+    MockBmsDevice mock_bms;
+    PowerService svc(&mock_bms, test_gpio_hal, DEFAULT_CONFIG);
+
+    REQUIRE_CALL(mock_bms, set_adc_enabled(false)).RETURN(false);
+    svc.enter_sleep(60000);
+  }
+
+  SECTION("no BMS attached — no crash") {
+    PowerService svc(nullptr, test_gpio_hal, DEFAULT_CONFIG);
+    svc.enter_sleep(60000);
+  }
+}
+
 // ============================================================================
 // TEST CASE 3 — poll_status (plain pass-through, no PMID sync)
 // ============================================================================
@@ -409,17 +433,73 @@ TEST_CASE("poll_status: charger status pass-through", "[PowerService][status]") 
 TEST_CASE("decide_sleep: sleep type and duration", "[PowerService][sleep]") {
   MockBmsDevice mock_bms;
 
-  SECTION("Non-Offline mode — None with zero duration") {
+  SECTION("Portable sleep enabled, no BLE link — Deep for the rest of the interval") {
+    PowerService svc(&mock_bms, test_gpio_hal, DEFAULT_CONFIG);
+
+    GoSettings settings{};
+    settings.measure_interval_seconds = 60;
+    settings.portable_sleep_enabled = true;
+
+    auto d = svc.decide_sleep(settings, LockState::Locked, OperatingMode::Portable, 3000, false);
+    CHECK(d.type == PowerService::SleepType::Deep);
+    CHECK(d.duration_ms == 57000);
+  }
+
+  SECTION("Portable sleep enabled but BLE link active — None") {
+    PowerService svc(&mock_bms, test_gpio_hal, DEFAULT_CONFIG);
+
+    GoSettings settings{};
+    settings.measure_interval_seconds = 60;
+    settings.portable_sleep_enabled = true;
+
+    auto d = svc.decide_sleep(settings, LockState::Locked, OperatingMode::Portable, 0, true);
+    CHECK(d.type == PowerService::SleepType::None);
+    CHECK(d.duration_ms == 0);
+  }
+
+  SECTION("Portable sleep enabled but Unlocked — None") {
+    PowerService svc(&mock_bms, test_gpio_hal, DEFAULT_CONFIG);
+
+    GoSettings settings{};
+    settings.measure_interval_seconds = 60;
+    settings.portable_sleep_enabled = true;
+
+    auto d = svc.decide_sleep(settings, LockState::Unlocked, OperatingMode::Portable, 0, false);
+    CHECK(d.type == PowerService::SleepType::None);
+  }
+
+  SECTION("Portable sleep setting never applies to Stationary") {
+    PowerService svc(&mock_bms, test_gpio_hal, DEFAULT_CONFIG);
+
+    GoSettings settings{};
+    settings.measure_interval_seconds = 60;
+    settings.portable_sleep_enabled = true;
+
+    auto d = svc.decide_sleep(settings, LockState::Locked, OperatingMode::Stationary, 0, false);
+    CHECK(d.type == PowerService::SleepType::None);
+  }
+
+  SECTION("Offline ignores the BLE link flag") {
     PowerService svc(&mock_bms, test_gpio_hal, DEFAULT_CONFIG);
 
     GoSettings settings{};
     settings.measure_interval_seconds = 60;
 
-    auto d = svc.decide_sleep(settings, LockState::Locked, OperatingMode::Portable, 0);
+    auto d = svc.decide_sleep(settings, LockState::Locked, OperatingMode::Offline, 0, true);
+    CHECK(d.type == PowerService::SleepType::Deep);
+  }
+
+  SECTION("Non-Offline mode (Portable sleep disabled) — None with zero duration") {
+    PowerService svc(&mock_bms, test_gpio_hal, DEFAULT_CONFIG);
+
+    GoSettings settings{};
+    settings.measure_interval_seconds = 60;
+
+    auto d = svc.decide_sleep(settings, LockState::Locked, OperatingMode::Portable, 0, false);
     CHECK(d.type == PowerService::SleepType::None);
     CHECK(d.duration_ms == 0);
 
-    d = svc.decide_sleep(settings, LockState::Locked, OperatingMode::Stationary, 0);
+    d = svc.decide_sleep(settings, LockState::Locked, OperatingMode::Stationary, 0, false);
     CHECK(d.type == PowerService::SleepType::None);
     CHECK(d.duration_ms == 0);
   }
@@ -430,7 +510,7 @@ TEST_CASE("decide_sleep: sleep type and duration", "[PowerService][sleep]") {
     GoSettings settings{};
     settings.measure_interval_seconds = 60;
 
-    auto d = svc.decide_sleep(settings, LockState::Unlocked, OperatingMode::Offline, 0);
+    auto d = svc.decide_sleep(settings, LockState::Unlocked, OperatingMode::Offline, 0, false);
     CHECK(d.type == PowerService::SleepType::None);
     CHECK(d.duration_ms == 0);
   }
@@ -441,7 +521,7 @@ TEST_CASE("decide_sleep: sleep type and duration", "[PowerService][sleep]") {
     GoSettings settings{};
     settings.measure_interval_seconds = 60;
 
-    auto d = svc.decide_sleep(settings, LockState::Locked, OperatingMode::Offline, 3000);
+    auto d = svc.decide_sleep(settings, LockState::Locked, OperatingMode::Offline, 3000, false);
     CHECK(d.type == PowerService::SleepType::Deep);
     CHECK(d.duration_ms == 57000);
   }
@@ -452,7 +532,7 @@ TEST_CASE("decide_sleep: sleep type and duration", "[PowerService][sleep]") {
     GoSettings settings{};
     settings.measure_interval_seconds = 10;
 
-    auto d = svc.decide_sleep(settings, LockState::Locked, OperatingMode::Offline, 7000);
+    auto d = svc.decide_sleep(settings, LockState::Locked, OperatingMode::Offline, 7000, false);
     CHECK(d.type == PowerService::SleepType::None);
     CHECK(d.duration_ms == 0);
   }
@@ -463,7 +543,7 @@ TEST_CASE("decide_sleep: sleep type and duration", "[PowerService][sleep]") {
     GoSettings settings{};
     settings.measure_interval_seconds = 3;
 
-    auto d = svc.decide_sleep(settings, LockState::Locked, OperatingMode::Offline, 1000);
+    auto d = svc.decide_sleep(settings, LockState::Locked, OperatingMode::Offline, 1000, false);
     CHECK(d.type == PowerService::SleepType::None);
     CHECK(d.duration_ms == 0);
   }
@@ -476,7 +556,7 @@ TEST_CASE("decide_sleep: sleep type and duration", "[PowerService][sleep]") {
     GoSettings settings{};
     settings.measure_interval_seconds = 3; // 3000 ms >= 2000
 
-    auto d = svc.decide_sleep(settings, LockState::Locked, OperatingMode::Offline, 0);
+    auto d = svc.decide_sleep(settings, LockState::Locked, OperatingMode::Offline, 0, false);
     CHECK(d.type == PowerService::SleepType::Deep);
     CHECK(d.duration_ms == 3000);
   }
@@ -488,12 +568,12 @@ TEST_CASE("decide_sleep: sleep type and duration", "[PowerService][sleep]") {
     settings.measure_interval_seconds = 10; // interval 10000 ms
 
     // 0 awake: 10000 ms >= 5000 -> Deep
-    auto d = svc.decide_sleep(settings, LockState::Locked, OperatingMode::Offline, 0);
+    auto d = svc.decide_sleep(settings, LockState::Locked, OperatingMode::Offline, 0, false);
     CHECK(d.type == PowerService::SleepType::Deep);
     CHECK(d.duration_ms == 10000);
 
     // 6000 awake: 4000 ms < 5000 -> None (stay awake)
-    d = svc.decide_sleep(settings, LockState::Locked, OperatingMode::Offline, 6000);
+    d = svc.decide_sleep(settings, LockState::Locked, OperatingMode::Offline, 6000, false);
     CHECK(d.type == PowerService::SleepType::None);
     CHECK(d.duration_ms == 0);
   }
@@ -504,7 +584,7 @@ TEST_CASE("decide_sleep: sleep type and duration", "[PowerService][sleep]") {
     GoSettings settings{};
     settings.measure_interval_seconds = 3;
 
-    auto d = svc.decide_sleep(settings, LockState::Locked, OperatingMode::Offline, 5000);
+    auto d = svc.decide_sleep(settings, LockState::Locked, OperatingMode::Offline, 5000, false);
     CHECK(d.type == PowerService::SleepType::None);
     CHECK(d.duration_ms == 0);
   }

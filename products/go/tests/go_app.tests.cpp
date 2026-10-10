@@ -66,6 +66,9 @@ extern RtcDisplaySnapshot rtc_snapshot;
 extern bool rtc_snapshot_valid;
 extern int warmup_step_count;
 extern int pm_sleep_count;
+extern int idle_for_sleep_count;
+extern OperatingMode last_decide_sleep_mode;
+extern bool last_decide_sleep_ble_link;
 extern Measures measures_to_return;
 extern bool sensor_started;
 extern bool gps_started;
@@ -541,9 +544,17 @@ TEST_CASE("select_boot_path: Button + Offline -> ButtonWake") {
   CHECK(select_boot_path(WakeCause::Button, state, false) == BootPath::ButtonWake);
 }
 
-TEST_CASE("select_boot_path: Button + Portable -> Interactive") {
+TEST_CASE("select_boot_path: Button + Portable -> ButtonWake") {
+  // Portable deep-sleeps only with portable_sleep_enabled; its button wake
+  // takes the same snapshot-first unlock path as Offline.
   RtcAppState state{};
   state.mode = OperatingMode::Portable;
+  CHECK(select_boot_path(WakeCause::Button, state, false) == BootPath::ButtonWake);
+}
+
+TEST_CASE("select_boot_path: Button + Stationary -> Interactive") {
+  RtcAppState state{};
+  state.mode = OperatingMode::Stationary;
   CHECK(select_boot_path(WakeCause::Button, state, false) == BootPath::Interactive);
 }
 
@@ -1148,6 +1159,7 @@ TEST_CASE("execute_fast_path: warm sensors, measure, sleep") {
   CHECK(board.sensors_warm_arg == true);
   CHECK(board.core_init_called == true);
   CHECK(test_spy::pm_sleep_count == 0); // held warm — sensor not slept
+  CHECK(test_spy::idle_for_sleep_count == 0); // warm wake reattaches running sensors
 }
 
 TEST_CASE("execute_fast_path: cold sensors full warmup, measure, sleep") {
@@ -1170,8 +1182,28 @@ TEST_CASE("execute_fast_path: cold sensors full warmup, measure, sleep") {
   CHECK(result.sensors_warm == false);
   CHECK(board.sensors_warm_arg == false);
   CHECK(test_spy::pm_sleep_count == 1); // long sleep — fan stopped for the window
+  CHECK(test_spy::idle_for_sleep_count == 1); // CO2/TVOC/pressure idled for the window
   // Warmup iterations should have been called
   CHECK(test_spy::warmup_step_count > 0);
+}
+
+TEST_CASE("execute_fast_path: decides sleep for the persisted mode with no BLE link") {
+  test_spy::reset();
+  test_spy::sleep_decision_to_return = {PowerService::SleepType::Deep, 60000};
+
+  MockBoard board;
+  GoApp app(board);
+  GoAppTestAccess access(app);
+
+  RtcAppState state{};
+  state.mode = OperatingMode::Portable;
+  volatile bool button = false;
+
+  auto result = access.execute_fast_path(state, button);
+
+  CHECK(result.outcome == GoAppTestAccess::Outcome::Sleep);
+  CHECK(test_spy::last_decide_sleep_mode == OperatingMode::Portable);
+  CHECK_FALSE(test_spy::last_decide_sleep_ble_link);
 }
 
 TEST_CASE("Offline fast path: temperature trip paints shutdown screen and shuts down") {

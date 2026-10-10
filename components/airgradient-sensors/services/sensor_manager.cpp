@@ -111,6 +111,49 @@ void SensorManager::pm_wake() {
   }
 }
 
+namespace {
+
+/// Log label for one sensor's idle_for_sleep() outcome.
+const char *idle_outcome(bool present, bool ok) {
+  if (!present) {
+    return "absent";
+  }
+  return ok ? "idle" : "failed";
+}
+
+} // namespace
+
+void SensorManager::idle_for_sleep() {
+  bool co2_ok = true;
+  if (_sensors.co2) {
+    co2_ok = _sensors.co2->stop_measurement();
+    if (!co2_ok) {
+      AG_LOGW(TAG, "idle_for_sleep: CO2 stop_measurement failed");
+    }
+  }
+
+  bool tvoc_nox_ok = true;
+  if (_sensors.tvoc_nox) {
+    tvoc_nox_ok = _sensors.tvoc_nox->heater_off();
+    if (!tvoc_nox_ok) {
+      AG_LOGW(TAG, "idle_for_sleep: TVOC/NOx heater_off failed");
+    }
+  }
+
+  bool pressure_ok = true;
+  if (_sensors.pressure) {
+    pressure_ok = _sensors.pressure->standby();
+    if (!pressure_ok) {
+      AG_LOGW(TAG, "idle_for_sleep: pressure standby failed");
+    }
+  }
+
+  AG_LOGI(TAG, "idle_for_sleep: co2=%s tvoc_nox=%s pressure=%s",
+          idle_outcome(_sensors.co2 != nullptr, co2_ok),
+          idle_outcome(_sensors.tvoc_nox != nullptr, tvoc_nox_ok),
+          idle_outcome(_sensors.pressure != nullptr, pressure_ok));
+}
+
 Co2CalibrationResult SensorManager::calibrate_co2() {
   if (!_sensors.co2 || !_sensors.co2->supports_calibration()) {
     return Co2CalibrationResult::Unsupported;

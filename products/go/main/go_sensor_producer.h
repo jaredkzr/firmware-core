@@ -60,6 +60,11 @@ public:
   /// @param sleep_pm true to sleep PM; false to keep it measuring.
   void stop(bool sleep_pm);
 
+  /// Idle the always-powered non-PM sensors (CO2, TVOC/NOx heater, pressure)
+  /// before a cold deep sleep. Call only after stop(); the next boot must
+  /// re-initialize the sensors, so never use this when the task restarts.
+  void idle_sensors_for_sleep();
+
   /// Trigger one measurement cycle with the given iteration count.
   /// Non-blocking: returns immediately after signalling the task via
   /// RTOS::task_notify_send().

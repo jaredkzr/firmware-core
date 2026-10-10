@@ -558,6 +558,10 @@ void PowerService::shutdown() {
   // If it does (failed or unexpected return), fall back to deep sleep with
   // GPIO wake sources so the user can press a button to try powering on again.
   // No timer is configured — this is a shutdown, not a scheduled wake cycle.
+  // Stop the charger's continuous ADC first; init() re-enables it on boot.
+  if (_bms != nullptr && !_bms->set_adc_enabled(false)) {
+    AG_LOGW(TAG, "shutdown: BMS ADC disable failed or unsupported");
+  }
   uint64_t wake_mask = 0;
   if (_config.pin_wake_button_power >= 0) {
     wake_mask |= 1ULL << _config.pin_wake_button_power;
@@ -646,9 +650,15 @@ RtcAppState PowerService::load_state() const {
 
 PowerService::SleepDecision PowerService::decide_sleep(const GoSettings &settings,
                                                        LockState lock_state, OperatingMode mode,
-                                                       uint32_t awake_ms) const {
-  // Only Offline mode enters sleep; Portable and Stationary stay awake.
-  if (mode != OperatingMode::Offline) {
+                                                       uint32_t awake_ms,
+                                                       bool ble_link_active) const {
+  // Offline always sleeps. Portable sleeps only when the user opted in and no
+  // phone is connected, because deep sleep tears down BLE. Stationary never
+  // sleeps.
+  const bool mode_allows_sleep =
+      mode == OperatingMode::Offline ||
+      (mode == OperatingMode::Portable && settings.portable_sleep_enabled && !ble_link_active);
+  if (!mode_allows_sleep) {
     return {SleepType::None, 0};
   }
 
@@ -699,6 +709,13 @@ void PowerService::set_pm_power(bool on) {
 // ---------------------------------------------------------------------------
 
 void PowerService::enter_sleep(uint32_t sleep_duration_ms) {
+  // Stop the charger's continuous ADC conversion: nothing reads telemetry
+  // while the CPU sleeps. BQ25629 init() re-enables it on the next boot.
+  // A failure only costs sleep current, so log it and keep going.
+  if (_bms != nullptr && !_bms->set_adc_enabled(false)) {
+    AG_LOGW(TAG, "enter_sleep: BMS ADC disable failed or unsupported");
+  }
+
 #ifndef TEST_HOST
   // Hold PM sensor power GPIO during short sleeps so the sensor stays warm
   // and the next fast-path boot can skip the 10 s warmup.

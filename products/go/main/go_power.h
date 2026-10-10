@@ -181,7 +181,7 @@ public:
 
   /// Sleep type selected by decide_sleep().
   enum class SleepType {
-    None, ///< Do not sleep (device is unlocked, not Offline, or interval too short)
+    None, ///< Do not sleep (unlocked, mode not eligible, BLE link up, or interval too short)
     Deep, ///< Deep sleep — CPU reboots on wake; does not return from enter_sleep()
   };
 
@@ -334,7 +334,9 @@ public:
   /// Uses Config::deep_sleep_threshold_ms from construction.
   ///
   /// Rules:
-  ///   - Not Offline mode  -> {None, 0}  (only Offline sleeps)
+  ///   - Stationary        -> {None, 0}  (always awake)
+  ///   - Portable          -> {None, 0} unless settings.portable_sleep_enabled
+  ///                          and no BLE link is active (sleep tears BLE down)
   ///   - Unlocked          -> {None, 0}  (never sleep while user is active)
   ///   - sleep_ms >= deep_sleep_threshold_ms -> {Deep, sleep_ms}
   ///   - sleep_ms <  deep_sleep_threshold_ms -> {None, 0}  (stay awake; avoid
@@ -346,8 +348,10 @@ public:
   /// @param lock_state Current lock state.
   /// @param mode       Current operating mode.
   /// @param awake_ms   Milliseconds the device has been awake this cycle.
+  /// @param ble_link_active True while a BLE central is connected or a BLE OTA
+  ///                   transfer is running. Only consulted in Portable mode.
   SleepDecision decide_sleep(const GoSettings &settings, LockState lock_state, OperatingMode mode,
-                             uint32_t awake_ms) const;
+                             uint32_t awake_ms, bool ble_link_active) const;
 
   /// Return true when the given sleep duration is short enough that keeping
   /// the PM sensor powered (GPIO held) across deep sleep is beneficial.

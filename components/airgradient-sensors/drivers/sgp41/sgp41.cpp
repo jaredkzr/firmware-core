@@ -153,6 +153,21 @@ bool SGP41::run_conditioning() {
   return true;
 }
 
+bool SGP41::heater_off() {
+  if (_dev_handle == nullptr) {
+    return true;
+  }
+
+  if (!_sendCommand(CMD_HEATER_OFF)) {
+    ESP_LOGW(TAG, "Heater-off command failed");
+    return false;
+  }
+
+  RTOS::delay_ms(HEATER_OFF_DELAY_MS);
+  ESP_LOGI(TAG, "Heater off for sleep");
+  return true;
+}
+
 uint8_t SGP41::_calculateCrc8(const uint8_t *data, uint8_t len) const {
   // CRC-8 polynomial: 0x31 (x^8 + x^5 + x^4 + 1)
   // Initialization: 0xFF

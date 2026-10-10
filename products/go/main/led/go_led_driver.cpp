@@ -26,7 +26,10 @@ static constexpr uint8_t REG_DEVICE_CONFIG0 = 0x00;
 static constexpr uint8_t REG_DEVICE_CONFIG1 = 0x01;
 static constexpr uint8_t REG_OUT0_COLOR = 0x14; // OUTn = REG_OUT0_COLOR + n
 
+// DEVICE_CONFIG0 bit 6 = Chip_EN: 1 = normal mode, 0 = standby. All other
+// DEVICE_CONFIG0 bits are reserved and written as 0.
 static constexpr uint8_t DEV_CONFIG0_CHIP_EN = 0x40;
+static constexpr uint8_t DEV_CONFIG0_STANDBY = 0x00;
 // Bit 3 = AUTO_INCR_EN, Bit 5 = PWM_DITHERING_EN
 static constexpr uint8_t DEV_CONFIG1_DEFAULT = 0b00111000;
 
@@ -98,6 +101,15 @@ bool LP5036::set_rgb(uint8_t b_channel, uint8_t r, uint8_t g, uint8_t b) {
   return _write_reg(REG_OUT0_COLOR + b_channel, b) &&
          _write_reg(REG_OUT0_COLOR + b_channel + 1, g) &&
          _write_reg(REG_OUT0_COLOR + b_channel + 2, r);
+}
+
+bool LP5036::standby() {
+  if (!_write_reg(REG_DEVICE_CONFIG0, DEV_CONFIG0_STANDBY)) {
+    AG_LOGW(TAG, "standby failed (no ACK at 0x%02X?)", _config.address);
+    return false;
+  }
+  AG_LOGI(TAG, "standby");
+  return true;
 }
 
 // ===========================================================================

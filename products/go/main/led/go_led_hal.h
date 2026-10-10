@@ -27,5 +27,10 @@ public:
   virtual bool set_channel(uint8_t channel, uint8_t pwm) = 0;
   virtual bool set_rgb(uint8_t b_channel, uint8_t r, uint8_t g, uint8_t b) = 0;
 
+  /// Put the controller in its lowest-power state with every output dark.
+  /// init() must restore normal operation. Default for drivers without a
+  /// standby mode: no-op that succeeds.
+  virtual bool standby() { return true; }
+
   static constexpr uint8_t NUM_CHANNELS = 36;
 };

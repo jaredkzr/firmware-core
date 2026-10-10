@@ -20,6 +20,12 @@ public:
   virtual bool supports_temp_hum() const { return false; }
   virtual TempHumData temp_hum_data() = 0;
 
+  /// Stop background measurement and leave the sensor in standby before a
+  /// cold ESP deep sleep. The next init() must restart measurement. Default
+  /// no-op that succeeds, for sensors without a standby mode. Returns false
+  /// only when the standby command failed.
+  virtual bool standby() { return true; }
+
 private:
 };
 

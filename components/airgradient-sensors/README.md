@@ -73,10 +73,10 @@ sensor type is as simple as leaving its pointer null.
 |---|---|---|
 | `hal/temp_hum_sensor.h` | `TempHumSensor` | — |
 | `hal/pm_sensor.h` | `PMSensor` | `supports_temp_hum()` / `temp_hum_data()` for PM sensors with integrated temp/hum (e.g. PMS5003T); optional `sleep()` / `wake()` low-power hooks (default no-op) |
-| `hal/co2_sensor.h` | `CO2Sensor` | `supports_temp_hum()` / `temp_hum_data()` for CO2 sensors with integrated temp/hum; optional automatic-background-calibration-period hooks |
-| `hal/tvoc_nox_sensor.h` | `TVOCNOxSensor` | `run_conditioning()` (default no-op) for warmup; `set_compensation()` (default no-op) for ambient temp/hum compensation |
+| `hal/co2_sensor.h` | `CO2Sensor` | `supports_temp_hum()` / `temp_hum_data()` for CO2 sensors with integrated temp/hum; optional automatic-background-calibration-period hooks; `stop_measurement()` (default no-op) to idle before a cold deep sleep |
+| `hal/tvoc_nox_sensor.h` | `TVOCNOxSensor` | `run_conditioning()` (default no-op) for warmup; `set_compensation()` (default no-op) for ambient temp/hum compensation; `heater_off()` (default no-op) to idle before a cold deep sleep |
 | `hal/o3_no2_sensor.h` | `O3No2Sensor` | — |
-| `hal/pressure_sensor.h` | `PressureSensor` | — |
+| `hal/pressure_sensor.h` | `PressureSensor` | `standby()` (default no-op) to stop measuring before a cold deep sleep |
 
 ## Drivers
 
@@ -88,11 +88,11 @@ sensor type is as simple as leaving its pointer null.
 | `drivers/s8` | SenseAir S8 | Modbus RTU over serial | CO2 |
 | `drivers/sunlight` | SenseAir Sunlight | Modbus RTU over serial | CO2 |
 | `drivers/s12` | SenseAir S12 | I2C | CO2; reads a single big-endian 16-bit register (default 0x06/0x07 = filtered, pressure-compensated). Supports background calibration. Automatic-background-calibration requests are temporarily acknowledged without sensor I/O to avoid unsafe ABC and MeterControl writes; no integrated temp/hum |
-| `drivers/stcc4` | Sensirion STCC4 | I2C | CO2 with integrated temp/hum (`supports_temp_hum() = true`) |
-| `drivers/scd4x` | Sensirion SCD41 | I2C | CO2 with integrated temp/hum, configurable automatic self-calibration period, and opt-in retained periodic-measurement reattachment after deep sleep. Thin adapter around the shared `embedded-i2c-scd4x` driver. Singleton — only one instance on the bus, since the underlying driver keeps the I2C handle and address in file-scope globals |
-| `drivers/sgp41` | Sensirion SGP41 | I2C | TVOC + NOx |
+| `drivers/stcc4` | Sensirion STCC4 | I2C | CO2 with integrated temp/hum (`supports_temp_hum() = true`). `stop_measurement()` sends stop (`0x3F86`), waits its 1.2 s execution time, and discards any sample still flagged ready so the next `init()` restarts measurement |
+| `drivers/scd4x` | Sensirion SCD41 | I2C | CO2 with integrated temp/hum, configurable automatic self-calibration period, and opt-in retained periodic-measurement reattachment after deep sleep. `stop_measurement()` sends `stop_periodic_measurement` without the 500 ms guard; the next `init(false)` restarts measurement. Thin adapter around the shared `embedded-i2c-scd4x` driver. Singleton — only one instance on the bus, since the underlying driver keeps the I2C handle and address in file-scope globals |
+| `drivers/sgp41` | Sensirion SGP41 | I2C | TVOC + NOx. `heater_off()` sends turn-heater-off (`0x3615`); the next conditioning or measure command re-heats |
 | `drivers/alpha_sense` | AlphaSense O3 / NO2 | I2C (dual ADS1115) | Electrochemical front-end |
-| `drivers/dps368` | Infineon DPS368 | I2C | Pressure |
+| `drivers/dps368` | Infineon DPS368 | I2C | Pressure. `standby()` writes `MEAS_CFG` = standby; `init()` soft-resets and restarts continuous mode |
 | `drivers/co2_common` | (helper) | — | Shared Modbus CRC helper used by S8 and Sunlight |
 
 ### SPS30 Particle-Count Mapping
@@ -176,6 +176,21 @@ measurement:
 `warmup_step()` performs one cycle without pacing; its caller controls timing.
 Passing `condition_gas=false` skips TVOC/NOx conditioning while retaining the
 PM discard reads. The blocking `warmup()` uses the default `true`.
+
+### `idle_for_sleep()`
+
+Puts the non-PM sensors into their lowest-power idle states before a cold
+ESP deep sleep, where the next wake fully re-initializes sensors:
+
+- `co2->stop_measurement()`: stops continuous / periodic measurement.
+- `tvoc_nox->heater_off()`: switches the hotplate off.
+- `pressure->standby()`: stops background measurement.
+
+Null sensors are skipped. A failed call logs a warning and does not stop the
+others or block sleep. One `AG_LOGI` line summarizes each sensor as `idle`,
+`failed`, or `absent`. PM sensors are not touched; use `pm_sleep()`. Reads
+fail after this call until the sensors are re-initialized, so do not call it
+before a warm sleep that resumes retained measurement.
 
 ## Configuration
 

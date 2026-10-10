@@ -145,11 +145,13 @@ threshold:
 
 ## Sleep Type Selection
 
-`decide_sleep(settings, lock_state, mode, awake_ms)` is pure logic (no
-platform calls, testable on host). Returns `SleepDecision {type, duration_ms}`:
+`decide_sleep(settings, lock_state, mode, awake_ms, ble_link_active)` is pure
+logic (no platform calls, testable on host). Returns
+`SleepDecision {type, duration_ms}`:
 
 ```text
-Not Offline mode → {None, 0}   (only Offline mode sleeps)
+Stationary       → {None, 0}   (always awake)
+Portable         → {None, 0}   unless portable_sleep_enabled && !ble_link_active
 Unlocked         → {None, 0}   (never sleep while user is active)
 
 sleep_ms = (measure_interval_seconds * 1000) - awake_ms   (clamped to 0)
@@ -161,6 +163,48 @@ sleep_ms <  deep_sleep_threshold_ms → {None, 0}   (stay awake)
 The single `measure_interval_seconds` (always ≥ 1) determines the sleep
 duration directly. `awake_ms` is subtracted so the total cycle (awake +
 sleep) matches the configured interval.
+
+The orchestrator passes `ble_link_active = is_connected() || ota.is_ble_active()`.
+The fast path passes the persisted `RtcAppState::mode` and `false`, because it
+never starts BLE.
+
+`Orchestrator::try_enter_sleep()` does not consult `decide_sleep()` while a
+measurement or user refresh is outstanding, or while the producer is still
+executing a PM sleep command (`Sleeping`). Sleep entry deletes the producer
+task, so entering mid-read would discard the sample. A `Preparing` sensor is
+awake and powered, so sleep may proceed; a fast-path promotion can re-sleep
+without waiting out the producer's boot warmup.
+
+## Portable Sleep
+
+With `GoSettings::portable_sleep_enabled` (menu row **Portable Sleep**, BLE
+config key `"port_sleep"`, default off), a locked Portable device with no BLE
+central connected follows the same deep-sleep cycle as Offline mode:
+
+- **Phone connected:** the device stays awake and streams as usual. Once the
+  central disconnects, the next loop iteration may enter deep sleep
+- **While asleep:** BLE is off, so the device does not advertise and the app
+  cannot connect. Measurements, the chart cache, and route points are still
+  recorded by the fast path
+- **Timer wake:** the fast path runs exactly as for Offline and goes back to
+  sleep without starting BLE
+- **Button wake:** `select_boot_path()` routes Portable button wakes through
+  the button-wake path, which paints the RTC snapshot unlocked and then brings
+  BLE up in `Orchestrator::init()`. A bonded phone reconnects while the device
+  is unlocked, which keeps it awake
+- **TVOC/NOx index:** the gas-index algorithm needs continuous sampling, so
+  deep-sleep cycles show raw SRAW ticks, the same as Offline mode
+
+The Portable PM duty cycle can leave the SPS30 asleep when deep sleep begins.
+`prepare_for_sleep()` never holds an `Asleep` PM sensor warm or sends it a
+second sleep command. It is treated as a cold sleep, so the next wake runs the
+full warmup instead of reading a sleeping SPS30.
+
+Power savings depend on the measurement interval. Below
+`sensor_hold_max_sleep_ms` (20 s) every sleep is warm, so the SPS30 fan and
+the CO2 sensor keep running and only the CPU and radio are saved. At 30 s and
+above, sleeps are cold and the always-powered sensors are idled (see
+[Sleep Entry](#sleep-entry)).
 
 ## Sleep Entry
 
@@ -181,10 +225,30 @@ sleep) matches the configured interval.
 
 The caller must set `RtcAppFlag::SensorsWarm` using `set_flag()` with the
 result of `should_hold_pm_sensor()`, then call `save_state()` **before**
-`enter_sleep()`.
+`enter_sleep()`. The orchestrator also requires `_pm_state != Asleep`: an
+SPS30 already asleep from the Portable duty cycle is never saved as warm.
 The same decision controls sensor-producer shutdown: held sleeps stop the task
-with `sleep_pm=false`, while longer sleeps use `sleep_pm=true`. This keeps the
-SPS30's internal measurement state consistent with the persisted warm flag.
+with `sleep_pm=false`, while longer sleeps use `sleep_pm=true` (skipped when
+the sensor is already asleep). This keeps the SPS30's internal measurement
+state consistent with the persisted warm flag.
+
+Before every deep sleep the orchestrator also:
+
+- Calls `LedService::shutdown()`: all LEDs off and the LP5036 in standby. The
+  fast path never constructs the LED service, so the chip stays in standby
+  across timer wakes
+- Keeps GNSS tracking only when `is_gps_active()` and a tracking session is
+  active, which is the same condition under which the fast path reads GPS.
+  Otherwise it sends GNSS stop, so `GpsMode::AlwaysOn` without a session does
+  not track through every sleep
+- On a cold sleep (PM not held), calls
+  `SensorProducer::idle_sensors_for_sleep()` after stopping the task. That
+  calls `SensorManager::idle_for_sleep()`, which stops CO2 periodic
+  measurement, turns off the SGP41 heater, and puts the pressure sensor in
+  standby. The cold-wake init re-initializes all three. The fast path does the
+  same on its own cold sleeps. This is deliberately not part of
+  `SensorProducer::stop()`: the provisioning pause restarts the producer
+  without re-initializing sensors
 
 ### Retained Uptime
 

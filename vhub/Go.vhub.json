@@ -1,6 +1,6 @@
 {
   "schema_version": "1.0",
-  "rev": "39b7085",
+  "rev": "a7dc0ad",
   "product": {
     "slug": "airgradient-go",
     "name": "AirGradient Go",
@@ -584,6 +584,24 @@
       "description": "Offline mode disables radios while measurements, deep-sleep cycles, and route tracking continue",
       "expected_result": "With a route active, Offline locked, and interval=30, two cycles each log \"enter_sleep: entering deep sleep\" followed by \"run_fast_path: entering fast-path boot\" and append a point to the same session. Compare those timer-wake route gas fields with the same-cycle serial SGP41 raw ticks; they match the raw values, not the 1-500 conditioned indexes. Power wakes the unit through \"run_button_wake_path: entering button-wake boot\", Home is unlocked for at least 10 seconds without input, and the session ID is unchanged. Returning Portable exports all pre-sleep and post-wake points. Next pause an active session, record its ID/count, and repeat two locked Offline sleep/wake cycles. The pause icon survives each wake, fast-path measurements continue, and Power wake leaves the session Paused. On returning Portable, the menu offers Resume Tracking and History shows the same route ID with no additional points from the paused cycles. Resume, record another point, and Stop; the same route exports its earlier points plus the resumed point. On each Power wake, reopen Tracking > Status: during Recording, Active and Elapsed include the sleep interval and Points includes the timer-wake records; Last reflects the most recent timer-wake point. During Paused sleep, Active and Points remain unchanged while Elapsed and Last include time asleep. Keeping Status open for at least 30 seconds with Auto Lock set to 10 seconds prevents deep sleep; manually locking allows the next sleep cycle.",
       "notes": "Record session ID, point count, serial raw gas values, and chart count before sleep. Use GPS On When Tracking. Observe two Recording cycles and two Paused cycles, record the count after Pause closes the file, then resume, stop/export/delete the route, and restore interval, GPS, and mode. Before each Recording and Paused sleep run, photograph Status values and record phone time; compare again immediately after Power wake, allowing one five-second display interval plus one second for rounding. Use serial append timestamps to check Last. Record and restore Auto Lock."
+    },
+    {
+      "id": "portable.sleep.between-samples",
+      "category": "Operating Modes",
+      "sub_category": "Portable sleep",
+      "applies_to": ["V1"],
+      "description": "Portable Sleep deep-sleeps between measurements only while locked with no BLE central, and recovers BLE on unlock",
+      "expected_result": "With Portable Sleep Off (default), a locked Portable unit with no phone connected logs no \"entering deep sleep\" for two minutes and keeps advertising. Set Settings > Operations > Portable Sleep: On; BLE Config reads \"port_sleep\": true and the value survives a reboot. Set interval=60, disconnect the app, and lock: within one interval serial logs \"entering deep sleep\", a BLE scan shows no AirGradient Go advertisement during the sleep, and each timer wake logs \"run_fast_path: entering fast-path boot\" and returns to sleep without BLE initialization. Press Power during a sleep: serial logs \"run_button_wake_path: entering button-wake boot\", Home is painted unlocked from the last values, the unit advertises, and the bonded phone reconnects without a passkey. With the phone connected, let the unit auto-lock and observe for two intervals: no deep-sleep entry occurs and Measures notifications continue. Disconnect the app: deep sleep resumes within one interval. Set Portable Sleep: Off and lock with no phone: no deep-sleep entry for two minutes.",
+      "notes": "Use a production V1 with a bonded phone. Capture serial throughout and run a BLE scanner during sleeps. TVOC/NOx show raw ticks on timer-wake frames, as in Offline. Restore Portable Sleep Off and the original interval."
+    },
+    {
+      "id": "power.sleep.peripheral-idle",
+      "category": "Power Management",
+      "sub_category": "Deep-sleep current",
+      "applies_to": ["V1"],
+      "description": "Cold deep sleeps idle the LEDs, GNSS without a tracking session, and the always-powered sensors, and every sensor recovers on wake",
+      "expected_result": "In Portable with Portable Sleep On (or Offline), interval=60, AQI LED Bright, GPS Always On, and no tracking session, lock with no phone connected. During each sleep the AQI LEDs are dark, and the average battery-side current measured across a full sleep window is recorded. Repeat with AQI LED Off and GPS Always Off; the two sleep-window averages differ by less than 1 mA. Each wake logs sensors_warm=0, performs the full warmup, and the first fast-path measurement after every sleep has valid PM2.5, CO2, temperature, humidity, pressure, and nonzero TVOC/NOx raw ticks. After a Power wake, the AQI LEDs return to the measured AQI color at the next measurement and touch input works. Start a tracking session and repeat one cycle: the route gains a point with a GPS fix within the fast-path read timeout. Across the run, serial shows no I2C timeout, sensor init failure, or unexpected reboot.",
+      "notes": "Measure current with a bench ammeter in series with the cell or a supply in place of the cell, averaged over at least 30 s of a sleep window. Record both averages, the readings after each wake, and the LED state. Restore AQI LED, GPS mode, interval, and Portable Sleep."
     },
     {
       "id": "power.usb.charging-transition",

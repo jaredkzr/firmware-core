@@ -84,7 +84,8 @@ cfg.pin_button_boot  = BOARD_PIN_BUTTON_BOOT;
 InputService input_svc(cap1203, gpio::native::hal, event_queue, cfg);
 input_svc.start();
 
-// Clean shutdown (blocks until task exits via semaphore handshake):
+// Before deep sleep only (blocks until task exits via semaphore handshake,
+// then puts the CAP1203 into deep sleep):
 input_svc.stop();
 ```
 
@@ -264,6 +265,13 @@ CH1 gesture FSM re-reads after the ack to obtain settled state.
 Physical button GPIOs are configured as deep sleep wake sources by the Power
 Management service before entering sleep. The Input Service does not manage
 sleep wake configuration.
+
+`stop()` runs only right before ESP deep sleep. After the task exits and all
+ISRs are detached, it calls `CapTouchSensor::deep_sleep()`, which sets the
+CAP1203 `MAIN_CONTROL` DSLEEP bit. The CAP1203 INT line is not a wake
+source, so touch wake is unaffected. A failure is logged and ignored. Touch
+stays asleep through fast-path wakes; the next interactive boot's
+`CAP1203::init()` clears DSLEEP before applying its configuration.
 
 ### Wake-Press Suppression
 

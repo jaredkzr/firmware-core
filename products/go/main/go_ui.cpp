@@ -61,6 +61,9 @@ static constexpr uint8_t TOUCH_LED_COUNT = 3;
 static const char *const BUZZER_OPTIONS[] = {"Off", "On"};
 static constexpr uint8_t BUZZER_COUNT = 2;
 
+static const char *const PORTABLE_SLEEP_OPTIONS[] = {"Off", "On"};
+static constexpr uint8_t PORTABLE_SLEEP_COUNT = 2;
+
 static const char *const MELODY_OPTIONS[] = {"Chime", "Tetris"};
 static constexpr uint8_t MELODY_COUNT = 2;
 
@@ -574,6 +577,7 @@ void UIManager::sync_settings(const GoSettings &s) {
   _setting_aqi_led = static_cast<uint8_t>(s.back_led_brightness);
   _setting_touch_led = static_cast<uint8_t>(s.touch_led_intensity);
   _setting_buzzer_volume = s.buzzer_enabled ? 1 : 0;
+  _setting_portable_sleep = s.portable_sleep_enabled ? 1 : 0;
 }
 
 void UIManager::apply_to_settings(GoSettings &settings) const {
@@ -610,6 +614,7 @@ void UIManager::apply_to_settings(GoSettings &settings) const {
   settings.back_led_brightness = static_cast<LedBrightness>(_setting_aqi_led);
   settings.touch_led_intensity = static_cast<TouchLedIntensity>(_setting_touch_led);
   settings.buzzer_enabled = (_setting_buzzer_volume == 1);
+  settings.portable_sleep_enabled = (_setting_portable_sleep == 1);
 }
 
 void UIManager::reset_to_home() {
@@ -973,7 +978,8 @@ void UIManager::browse_metric(int delta) {
 
 const UIManager::SettingId *UIManager::group_items(Screen screen, uint8_t &count) {
   static constexpr SettingId OPERATIONS[] = {SettingId::MeasureInterval, SettingId::Co2Calibration,
-                                             SettingId::GpsMode, SettingId::Buzzer};
+                                             SettingId::GpsMode, SettingId::Buzzer,
+                                             SettingId::PortableSleep};
   static constexpr SettingId DISPLAY_TOUCH[] = {SettingId::Units,     SettingId::AltitudeUnit,
                                                 SettingId::PmDisplay, SettingId::AutoLock,
                                                 SettingId::AqiLed,    SettingId::TouchLed};
@@ -1018,6 +1024,8 @@ uint8_t UIManager::setting_option_count(SettingId setting_id) const {
     return TOUCH_LED_COUNT;
   case SettingId::Buzzer:
     return BUZZER_COUNT;
+  case SettingId::PortableSleep:
+    return PORTABLE_SLEEP_COUNT;
   case SettingId::PlayMelody:
     return MELODY_COUNT;
   default:
@@ -1053,6 +1061,8 @@ uint8_t UIManager::setting_current_option(SettingId setting_id) const {
     return _setting_touch_led;
   case SettingId::Buzzer:
     return _setting_buzzer_volume;
+  case SettingId::PortableSleep:
+    return _setting_portable_sleep;
   case SettingId::PlayMelody:
     return _setting_melody;
   default:
@@ -1102,6 +1112,9 @@ void UIManager::apply_setting_choice(uint8_t option_index) {
     break;
   case SettingId::Buzzer:
     _setting_buzzer_volume = option_index;
+    break;
+  case SettingId::PortableSleep:
+    _setting_portable_sleep = option_index;
     break;
   case SettingId::PlayMelody:
     _setting_melody = option_index;
@@ -1852,6 +1865,11 @@ void UIManager::populate_settings_group_rows(DisplayValues &v) const {
     case SettingId::Buzzer:
       (void)snprintf(label, sizeof(label), "Buzzer: %s", BUZZER_OPTIONS[_setting_buzzer_volume]);
       break;
+    case SettingId::PortableSleep:
+      // "Portable Sleep: Off" is exactly the 19-character list-row width.
+      (void)snprintf(label, sizeof(label), "Portable Sleep: %s",
+                     PORTABLE_SLEEP_OPTIONS[_setting_portable_sleep]);
+      break;
     default:
       break;
     }
@@ -1904,6 +1922,9 @@ void UIManager::populate_settings_choice_rows(DisplayValues &v) const {
     break;
   case SettingId::Buzzer:
     options = BUZZER_OPTIONS;
+    break;
+  case SettingId::PortableSleep:
+    options = PORTABLE_SLEEP_OPTIONS;
     break;
   case SettingId::PlayMelody:
     options = MELODY_OPTIONS;

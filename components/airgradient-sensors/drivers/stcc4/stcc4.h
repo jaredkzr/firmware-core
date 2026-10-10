@@ -72,6 +72,20 @@ public:
   bool supports_temp_hum() const override;
   TempHumData temp_hum_data() override;
 
+  /**
+   * @brief Stop continuous measurement before a cold ESP deep sleep.
+   *
+   * Sends stop_continuous_measurement, waits STOP_DELAY_MS for the sensor to
+   * reach idle, then reads and discards any sample still flagged ready. That
+   * leaves the data-ready status clear, so the next init() does not mistake
+   * the idle sensor for one retained in continuous mode and restarts
+   * measurement. Blocks for about STOP_DELAY_MS.
+   *
+   * @return true when the sensor was not measuring or accepted the stop
+   *         command. A failed discard read is logged but does not fail.
+   */
+  bool stop_measurement() override;
+
 private:
   i2c_master_bus_handle_t _i2c_bus;
   i2c_master_dev_handle_t _dev_handle;
@@ -142,6 +156,12 @@ private:
    * @return true if the stop command succeeded
    */
   bool _stop_continuous_measurement();
+
+  /**
+   * @brief Read and drop a sample the data-ready status still reports.
+   * @return true if no sample was pending or it was read successfully
+   */
+  bool _discard_pending_measurement();
 
   /**
    * @brief Restart periodic measurement to recover from a stale / stopped state.

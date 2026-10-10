@@ -23,6 +23,8 @@ struct GoSettings {
   // --- Device behavior ---
   OperatingMode operating_mode = OperatingMode::Portable;
   int auto_lock_seconds = 10; // 0 = auto-lock disabled
+  // Portable only: deep-sleep between measurements while locked with no BLE link.
+  bool portable_sleep_enabled = false;
 
   // --- LED brightness ---
   LedBrightness back_led_brightness = LedBrightness::Off;

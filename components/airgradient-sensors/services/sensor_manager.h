@@ -160,6 +160,16 @@ public:
   void pm_sleep();
   void pm_wake();
 
+  /// Put the wired CO2, TVOC/NOx, and pressure sensors into their idle or
+  /// standby states before a cold ESP deep sleep.
+  ///
+  /// Call only when the next wake fully re-initializes sensors (warm = false):
+  /// CO2 measurement restarts in init(), TVOC/NOx re-heats during warmup, and
+  /// the pressure sensor restarts in init(). Reads fail until then. PM sensors
+  /// are not touched; use pm_sleep() for those. Missing sensors are skipped.
+  /// I2C failures are logged and never block sleep entry.
+  void idle_for_sleep();
+
   /// True if a TVOC/NOx sensor is wired into this manager.
   bool has_tvoc_nox_sensor() const { return _sensors.tvoc_nox != nullptr; }
 

@@ -67,7 +67,8 @@ static constexpr const char *TAG = "app";
 // domain; keep in sync with the Cloud service host.
 static constexpr const char *OTA_HTTP_DOMAIN = "hw.airgradient.com";
 
-// The GPS receiver remains powered and tracking through Offline deep sleep.
+// While a tracking session is active, the GPS receiver keeps tracking through
+// deep sleep (prepare_for_sleep idles it otherwise).
 // Allow several NMEA epochs after reconnecting the UART on timer wake.
 static constexpr uint32_t GPS_FAST_PATH_READ_TIMEOUT_MS = 3000;
 
@@ -446,7 +447,7 @@ GoApp::FastPathResult GoApp::execute_fast_path(const RtcAppState &state,
     // UX placeholder: fast path never configures the gas-index algorithm
     // (no SensorProducer), so index fields stay at invalid sentinels.
     // Overwrite with raw ticks so the display and stored route points
-    // still show a value during Offline fast-path cycles.
+    // still show a value during fast-path sleep cycles.
     measures.tvoc_nox.tvoc_index = measures.tvoc_nox.tvoc_raw;
     measures.tvoc_nox.nox_index = measures.tvoc_nox.nox_raw;
     ago = measures_to_ago(measures);
@@ -553,14 +554,18 @@ GoApp::FastPathResult GoApp::execute_fast_path(const RtcAppState &state,
     disp.init(values);
 
     uint32_t awake_ms = static_cast<uint32_t>(RTOS::get_time_ms()) - boot_time_ms;
-    auto decision = pwr.decide_sleep(settings, LockState::Locked, OperatingMode::Offline, awake_ms);
+    // The fast path never starts BLE, so a Portable sleep cycle has no link to keep.
+    auto decision = pwr.decide_sleep(settings, LockState::Locked, state.mode, awake_ms,
+                                     /*ble_link_active=*/false);
 
     if (decision.type == PowerService::SleepType::Deep) {
       const bool warm = pwr.should_hold_pm_sensor(decision.duration_ms);
       if (!warm) {
-        // Long sleep: stop the PM fan for the sleep window. Next boot's
-        // init() wakes the sensor and re-warms (sensors_warm=false).
+        // Long sleep: stop the PM fan and idle the always-powered I2C sensors
+        // for the sleep window. Next boot's cold init wakes and re-warms them
+        // (sensors_warm=false).
         sm.pm_sleep();
+        sm.idle_for_sleep();
       }
       return {
           .outcome = FastPathResult::Outcome::Sleep,
@@ -1064,7 +1069,10 @@ BootPath select_boot_path(WakeCause cause, const RtcAppState &state, bool chargi
       return BootPath::FastPath;
     }
   }
-  if (cause == WakeCause::Button && state.mode == OperatingMode::Offline) {
+  // Portable reaches deep sleep only with portable_sleep_enabled; its button
+  // wake reuses the snapshot-first unlock path and brings BLE up in init().
+  if (cause == WakeCause::Button &&
+      (state.mode == OperatingMode::Offline || state.mode == OperatingMode::Portable)) {
     return BootPath::ButtonWake;
   }
   return BootPath::Interactive;

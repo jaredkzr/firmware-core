@@ -178,7 +178,7 @@ rows follow this order:
 |---|---|
 | Tracking | Status, Pause Tracking or Resume Tracking, Stop Tracking |
 | Settings | Operations, Display & Touch, Hardware Test, Clear Data, Setup Guide, About Device |
-| Operations | Measurement Interval, CO2 Calibration, GPS Mode, Buzzer |
+| Operations | Measurement Interval, CO2 Calibration, GPS Mode, Buzzer, Portable Sleep |
 | Display & Touch | Temperature Unit, Altitude Unit, PM Display, Auto Lock, AQI LED, Touch LED |
 | Hardware Test | Peripheral Test, GPS Test, Accelerometer Test, Fuel Gauge Learning, Play Melody |
 
@@ -338,6 +338,7 @@ pairs so display ordering cannot change persisted mode identities.
 | CO2 Calibration | Action row | Opens confirm dialog |
 | Clear Data | Action row | Opens confirm dialog |
 | Buzzer | `Buzzer: Off / On` | Off, On |
+| Portable Sleep | `Portable Sleep: Off / On` | Off, On |
 | Play Melody | Hardware Test action row | Chime, Tetris |
 
 The orchestrator calls `sync_settings(const GoSettings &)` after loading or

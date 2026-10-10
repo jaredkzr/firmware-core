@@ -77,6 +77,15 @@ bool CAP1203::init() {
     return false;
   }
 
+  // Leave deep sleep / standby. Both MAIN_CONTROL bits survive ESP deep sleep
+  // because the chip stays powered, and deep_sleep() sets DSLEEP before
+  // sleep. Neither bit is cleared by any other register write.
+  if (!_exit_low_power()) {
+    ESP_LOGE(TAG, "failed to restore active mode");
+    _rm_device();
+    return false;
+  }
+
   // Apply sensitivity, thresholds, channel enable, and interrupt config.
   if (!_apply_config()) {
     ESP_LOGE(TAG, "apply config failed");
@@ -129,9 +138,9 @@ bool CAP1203::clear_interrupt() {
     return false;
   }
 
-  // Clear the INT bit (bit 0) if set.
-  if (main_ctrl & 0x01) {
-    main_ctrl &= static_cast<uint8_t>(~0x01u);
+  // Clear the INT bit if set.
+  if (main_ctrl & MAIN_CONTROL_INT) {
+    main_ctrl &= static_cast<uint8_t>(~MAIN_CONTROL_INT);
     if (!_write_reg(REG_MAIN_CONTROL, main_ctrl)) {
       return false;
     }
@@ -140,6 +149,42 @@ bool CAP1203::clear_interrupt() {
   // Read GENERAL_STATUS to latch-clear the touch event flags.
   uint8_t status = 0;
   return _read_reg(REG_GENERAL_STATUS, status);
+}
+
+bool CAP1203::deep_sleep() {
+  if (_dev_handle == nullptr) {
+    return false;
+  }
+
+  uint8_t main_ctrl = 0;
+  if (!_read_reg(REG_MAIN_CONTROL, main_ctrl)) {
+    ESP_LOGW(TAG, "deep sleep: MAIN_CONTROL read failed");
+    return false;
+  }
+
+  // Also clear INT so a latched touch does not hold the line low while the
+  // chip sleeps.
+  main_ctrl = static_cast<uint8_t>((main_ctrl | MAIN_CONTROL_DSLEEP) & ~MAIN_CONTROL_INT);
+  if (!_write_reg(REG_MAIN_CONTROL, main_ctrl)) {
+    ESP_LOGW(TAG, "deep sleep: MAIN_CONTROL write failed");
+    return false;
+  }
+
+  ESP_LOGI(TAG, "deep sleep");
+  return true;
+}
+
+bool CAP1203::_exit_low_power() {
+  uint8_t main_ctrl = 0;
+  if (!_read_reg(REG_MAIN_CONTROL, main_ctrl)) {
+    return false;
+  }
+  const uint8_t low_power_bits = MAIN_CONTROL_DSLEEP | MAIN_CONTROL_STBY;
+  if ((main_ctrl & low_power_bits) == 0) {
+    return true;
+  }
+  ESP_LOGI(TAG, "leaving low-power mode (MAIN_CONTROL=0x%02X)", main_ctrl);
+  return _write_reg(REG_MAIN_CONTROL, static_cast<uint8_t>(main_ctrl & ~low_power_bits));
 }
 
 bool CAP1203::_read_reg(uint8_t reg, uint8_t &out) {

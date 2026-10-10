@@ -33,6 +33,7 @@ public:
   IMPLEMENT_CONST_MOCK0(supports_noise);
   IMPLEMENT_CONST_MOCK0(supports_calibration);
   IMPLEMENT_MOCK1(calibrate);
+  IMPLEMENT_MOCK0(deep_sleep);
 };
 
 // ============================================================================
@@ -1006,5 +1007,24 @@ TEST_CASE("CH1 gesture queue timeout", "[InputService][touch][gesture][timeout]"
     // At t=1100: window remaining = 350 - 50 + 1 = 301ms.
     ALLOW_CALL(mock_rtos, get_time_ms_impl()).RETURN(1100);
     CHECK(svc.compute_queue_timeout_ms() == 301);
+  }
+}
+
+// ============================================================================
+// stop() — touch controller deep sleep before ESP deep sleep
+// ============================================================================
+
+TEST_CASE("stop puts the touch controller in deep sleep", "[InputService][stop]") {
+  MockCapTouchSensor mock_touch;
+  TestableInputService svc(mock_touch, make_config());
+
+  SECTION("deep_sleep requested once") {
+    REQUIRE_CALL(mock_touch, deep_sleep()).RETURN(true);
+    svc.stop();
+  }
+
+  SECTION("deep_sleep failure is tolerated") {
+    REQUIRE_CALL(mock_touch, deep_sleep()).RETURN(false);
+    svc.stop();
   }
 }

@@ -1837,6 +1837,9 @@ static void enc_tled(CborEncoder &m, const GoSettings &s) {
 static void enc_buz(CborEncoder &m, const GoSettings &s) {
   cbor_encode_boolean(&m, s.buzzer_enabled);
 }
+static void enc_port_sleep(CborEncoder &m, const GoSettings &s) {
+  cbor_encode_boolean(&m, s.portable_sleep_enabled);
+}
 static void enc_abc(CborEncoder &m, const GoSettings &s) {
   cbor_encode_int(&m, static_cast<int64_t>(s.co2_abc_days));
 }
@@ -1887,6 +1890,9 @@ static bool dif_tled(const GoSettings &a, const GoSettings &b) {
 static bool dif_buz(const GoSettings &a, const GoSettings &b) {
   return a.buzzer_enabled != b.buzzer_enabled;
 }
+static bool dif_port_sleep(const GoSettings &a, const GoSettings &b) {
+  return a.portable_sleep_enabled != b.portable_sleep_enabled;
+}
 static bool dif_abc(const GoSettings &a, const GoSettings &b) {
   return a.co2_abc_days != b.co2_abc_days;
 }
@@ -1923,6 +1929,7 @@ static const ConfigField CONFIG_FIELDS[] = {
     {BLE_KEY_BACK_LED, enc_bled, dif_bled},
     {BLE_KEY_TOUCH_LED, enc_tled, dif_tled},
     {BLE_KEY_BUZZER, enc_buz, dif_buz},
+    {BLE_KEY_PORTABLE_SLEEP, enc_port_sleep, dif_port_sleep},
     {BLE_KEY_ABC_DAYS, enc_abc, dif_abc},
     {BLE_KEY_TVOC_LEARNING_OFFSET, enc_tlo, dif_tlo},
     {BLE_KEY_NOX_LEARNING_OFFSET, enc_nlo, dif_nlo},
@@ -2348,6 +2355,16 @@ BleConfigDecodeResult BleService::decode_config_write(const uint8_t *buf, size_t
       bool v = false;
       if (cbor_value_is_boolean(&it) && cbor_value_get_boolean(&it, &v) == CborNoError) {
         settings.buzzer_enabled = v;
+      } else {
+        result.has_invalid_config_values = true;
+      }
+      handled = true;
+    } else if (key_is(BLE_KEY_PORTABLE_SLEEP)) {
+      cbor_value_advance(&it);
+      result.recognized_config_key_count++;
+      bool v = false;
+      if (cbor_value_is_boolean(&it) && cbor_value_get_boolean(&it, &v) == CborNoError) {
+        settings.portable_sleep_enabled = v;
       } else {
         result.has_invalid_config_values = true;
       }

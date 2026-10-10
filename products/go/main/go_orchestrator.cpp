@@ -3405,10 +3405,21 @@ BuildContext Orchestrator::build_context() const {
 // ---------------------------------------------------------------------------
 
 void Orchestrator::try_enter_sleep() {
+  // Sleep entry deletes the producer task, so wait out an in-flight read and a
+  // user refresh; otherwise the sensor timer's fresh measurement is discarded.
+  // Also wait out a PM sleep command the producer is still executing (brief).
+  // A Preparing sensor is awake and powered, so sleep may proceed: a fast-path
+  // promotion must be able to re-sleep without waiting out the boot warmup.
+  if (_measurement_pending || _refresh_pending || _pm_state == PmState::Sleeping) {
+    return;
+  }
+
   uint32_t now = static_cast<uint32_t>(RTOS::get_time_ms());
   uint32_t awake_ms = now - _last_measurement_ms;
 
-  auto decision = _svc.power_service.decide_sleep(_settings, _lock_state, _mode, awake_ms);
+  const bool ble_link_active = _svc.ble_service.is_connected() || _svc.ota.is_ble_active();
+  auto decision =
+      _svc.power_service.decide_sleep(_settings, _lock_state, _mode, awake_ms, ble_link_active);
 
   if (decision.type == PowerService::SleepType::None) {
     return;
@@ -3439,14 +3450,27 @@ void Orchestrator::prepare_for_sleep(uint32_t sleep_duration_ms) {
   // without NVS or sensor reads.
   save_rtc_display_snapshot(values);
 
-  const bool hold_pm_sensor = _svc.power_service.should_hold_pm_sensor(sleep_duration_ms);
+  // Portable duty-cycles the SPS30 while awake. A sensor already asleep
+  // cannot be held warm and needs no second sleep command; a Ready or
+  // Preparing sensor is awake and powered. try_enter_sleep() rules out the
+  // transient Sleeping state.
+  const bool pm_awake = _pm_state != PmState::Asleep;
+  const bool hold_pm_sensor =
+      pm_awake && _svc.power_service.should_hold_pm_sensor(sleep_duration_ms);
 
+  _svc.led_service.shutdown();
   _svc.ble_service.deinit();
-  _svc.sensor_producer.stop(/*sleep_pm=*/!hold_pm_sensor);
+  _svc.sensor_producer.stop(/*sleep_pm=*/pm_awake && !hold_pm_sensor);
+  if (!hold_pm_sensor) {
+    // Cold sleep: the next wake re-initializes every sensor, so idle the
+    // always-powered ones instead of letting them measure through the sleep.
+    _svc.sensor_producer.idle_sensors_for_sleep();
+  }
 
-  // Active GPS: stop task only — leave TAU1113 tracking for hot-start.
-  // Inactive GPS: stop task and send GNSS stop before sleep.
-  if (is_gps_active()) {
+  // Keep GNSS tracking only when the next fast-path wake reads it (an active
+  // tracking session, matching execute_fast_path()). Otherwise send GNSS stop,
+  // so AlwaysOn does not track through every sleep with no reader.
+  if (is_gps_active() && tracking_session_active(_tracking_state)) {
     _svc.gps_service.stop();
   } else {
     _svc.gps_service.stop_and_idle_gnss();

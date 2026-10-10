@@ -45,6 +45,16 @@ public:
   bool supports_temp_hum() const override;
   TempHumData temp_hum_data() override;
 
+  /**
+   * @brief Stop continuous measurement and enter standby
+   *
+   * Writes MEAS_CTRL = standby (MEAS_CFG bits 2:0 = 000). The next init()
+   * soft-resets the sensor and writes continuous mode again.
+   *
+   * @return true if the write succeeded (or the driver is not initialized)
+   */
+  bool standby() override;
+
 private:
   i2c_master_bus_handle_t _i2c_bus;
   i2c_master_dev_handle_t _dev_handle;

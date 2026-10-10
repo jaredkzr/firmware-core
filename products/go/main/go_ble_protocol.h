@@ -80,6 +80,7 @@ inline constexpr const char *BLE_KEY_OP_MODE = "op_mode";
 inline constexpr const char *BLE_KEY_BACK_LED = "bled";
 inline constexpr const char *BLE_KEY_TOUCH_LED = "tled";
 inline constexpr const char *BLE_KEY_BUZZER = "buz";
+inline constexpr const char *BLE_KEY_PORTABLE_SLEEP = "port_sleep";
 inline constexpr const char *BLE_KEY_ABC_DAYS = "abc";
 inline constexpr const char *BLE_KEY_TVOC_LEARNING_OFFSET = "tlo";
 inline constexpr const char *BLE_KEY_NOX_LEARNING_OFFSET = "nlo";

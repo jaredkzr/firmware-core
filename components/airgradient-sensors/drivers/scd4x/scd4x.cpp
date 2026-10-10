@@ -147,6 +147,26 @@ bool SCD4x::_start_periodic_measurement() {
   return false;
 }
 
+bool SCD4x::stop_measurement() {
+  if (!_measuring) {
+    return true;
+  }
+
+  const int16_t err = scd4x_stop_periodic_measurement();
+  if (err != 0) {
+    ESP_LOGW(TAG, "stop_periodic_measurement before sleep failed (err=%d)", err);
+    return false;
+  }
+  _measuring = false;
+
+  // No STOP_PERIODIC_DELAY_MS wait: Sensirion's 500 ms guard only applies to
+  // the next SCD4x command, and none follows before deep sleep. The sensor
+  // finishes stopping on its own. The next init() issues wake_up, stop and
+  // reinit with their own delays before restarting periodic measurement.
+  ESP_LOGI(TAG, "Periodic measurement stopped for sleep");
+  return true;
+}
+
 bool SCD4x::read(CO2Data &out) {
   // Initialize to invalid sentinel
   out.co2 = MeasuresInvalid::CO2;

@@ -146,11 +146,12 @@ TEST_CASE("UIManager: agreed menu hierarchy", "[UIManager][nav][redesign]") {
                   "Setup Guide", "About Device"});
   open_row(ui, "Operations");
   auto values = ui.build_values(make_default_ctx());
-  REQUIRE(values.row_count == 6);
+  REQUIRE(values.row_count == 7);
   CHECK(std::string(values.rows[2].text).rfind("Measure Int.: ", 0) == 0);
   CHECK(std::string(values.rows[3].text) == "CO2 Calibration");
   CHECK(std::string(values.rows[4].text) == "GPS: When tracking");
   CHECK(std::string(values.rows[5].text) == "Buzzer: Off");
+  CHECK(std::string(values.rows[6].text) == "Portable Sleep: Off");
   double_press(ui);
   open_row(ui, "Display & Touch");
   check_rows(ui, {"Exit", "Back", "Temperature Unit: C", "Altitude Unit: m", "PM Display: ug/m3",
@@ -199,6 +200,7 @@ TEST_CASE("UIManager: group choice returns and exit gestures", "[UIManager][nav]
       {"Operations", "Measure Int.", "10s", Screen::Operations},
       {"Operations", "GPS:", "Always On", Screen::Operations},
       {"Operations", "Buzzer:", "On", Screen::Operations},
+      {"Operations", "Portable Sleep:", "On", Screen::Operations},
       {"Display & Touch", "PM Display:", "USAQI", Screen::DisplayTouch},
       {"Display & Touch", "Auto Lock:", "60 Seconds", Screen::DisplayTouch},
   };
@@ -398,7 +400,7 @@ TEST_CASE("UIManager: grouped menus wrap and return to their parent",
   };
   const MenuCase cases[] = {
       {nullptr, Screen::Settings, "Operations", "About Device", 8},
-      {"Operations", Screen::Operations, "Measure Int.", "Buzzer: Off", 6},
+      {"Operations", Screen::Operations, "Measure Int.", "Portable Sleep: Off", 7},
       {"Display & Touch", Screen::DisplayTouch, "Temperature Unit: C", "Touch LED: Off", 8},
       {"Hardware Test", Screen::HardwareTest, "Peripheral Test", "Play Melody", 7},
   };
@@ -1111,6 +1113,25 @@ TEST_CASE("UIManager: unrelated setting preserves custom measurement interval",
   ui.apply_to_settings(output);
   CHECK(output.use_fahrenheit);
   CHECK(output.measure_interval_seconds == 17);
+}
+
+TEST_CASE("UIManager: Portable Sleep toggle syncs and applies", "[UIManager][settings][sleep]") {
+  UIManager ui(DEFAULT_UI_CONFIG);
+  GoSettings settings{};
+  settings.portable_sleep_enabled = true;
+  ui.sync_settings(settings);
+
+  go_to_group(ui, "Operations");
+  auto values = ui.build_values(make_default_ctx());
+  CHECK(std::string(values.rows[6].text) == "Portable Sleep: On");
+
+  open_row(ui, "Portable Sleep:");
+  const auto result = open_row(ui, "Off");
+  REQUIRE(result.action == UIAction::SettingsChanged);
+  GoSettings output{};
+  output.portable_sleep_enabled = true;
+  ui.apply_to_settings(output);
+  CHECK_FALSE(output.portable_sleep_enabled);
 }
 
 TEST_CASE("UIManager: fixed choice replaces custom measurement interval",

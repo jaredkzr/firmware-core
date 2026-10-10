@@ -406,6 +406,7 @@ keeps this value updated whenever the orchestrator calls `update_config()`.
 | `"bled"` | uint | `back_led_brightness` | `cbor_encode_uint` (0–3) |
 | `"tled"` | uint | `touch_led_intensity` | `cbor_encode_uint` (0–2) |
 | `"buz"` | bool | `buzzer_enabled` | `cbor_encode_boolean` |
+| `"port_sleep"` | bool | `portable_sleep_enabled` | `cbor_encode_boolean` |
 | `"abc"` | int | `co2_abc_days` | `cbor_encode_int` (`-1` or 1–200) |
 | `"tlo"` | uint | `tvoc_learning_offset` | `cbor_encode_uint` (1–1000 hours) |
 | `"nlo"` | uint | `nox_learning_offset` | `cbor_encode_uint` (1–1000 hours) |

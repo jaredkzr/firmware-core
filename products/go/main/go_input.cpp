@@ -111,6 +111,14 @@ void InputService::stop() {
   _gpio.disable_interrupt(_config.pin_button_boot);
   _gpio.remove_interrupt_handler(_config.pin_button_boot);
 
+  // stop() runs only right before ESP deep sleep. The task has exited and the
+  // ISRs are detached, so nothing else touches the controller. Its INT line
+  // is not a wake source; the next interactive boot's init() restores
+  // active sensing.
+  if (!_touch.deep_sleep()) {
+    AG_LOGW(TAG, "touch controller deep sleep failed");
+  }
+
   if (_raw_queue != nullptr) {
     RTOS::queue_delete(_raw_queue);
     _raw_queue = nullptr;

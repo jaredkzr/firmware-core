@@ -64,6 +64,14 @@ void SensorProducer::stop(bool sleep_pm) {
   }
 }
 
+void SensorProducer::idle_sensors_for_sleep() {
+  if (_task_handle != nullptr) {
+    AG_LOGW(TAG, "idle_sensors_for_sleep ignored: task still running");
+    return;
+  }
+  _manager.idle_for_sleep();
+}
+
 void SensorProducer::request_measurement(uint8_t iterations, SensorGroup groups,
                                          MeasurementOrigin origin) {
   if (_task_handle != nullptr) {

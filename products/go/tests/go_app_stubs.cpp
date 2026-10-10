@@ -44,6 +44,7 @@ bool rtc_snapshot_valid = false;
 // --- SensorManager ---
 int warmup_step_count = 0;
 int pm_sleep_count = 0;
+int idle_for_sleep_count = 0;
 Measures measures_to_return{};
 uint32_t co2_abc_period_apply_count = 0;
 int last_co2_abc_period_days = 0;
@@ -88,6 +89,8 @@ bool state_saved = false;
 RtcAppState last_saved_state{};
 PowerSnapshot snapshot_to_return{};
 PowerService::SleepDecision sleep_decision_to_return = {PowerService::SleepType::Deep, 60000};
+OperatingMode last_decide_sleep_mode = OperatingMode::Stationary;
+bool last_decide_sleep_ble_link = true;
 bool enter_sleep_called = false;
 uint32_t enter_sleep_duration_ms = 0;
 bool should_hold_pm_result = false;
@@ -150,6 +153,7 @@ void reset() {
 
   warmup_step_count = 0;
   pm_sleep_count = 0;
+  idle_for_sleep_count = 0;
   measures_to_return = Measures{};
   co2_abc_period_apply_count = 0;
   last_co2_abc_period_days = 0;
@@ -189,6 +193,8 @@ void reset() {
   last_saved_state = RtcAppState{};
   snapshot_to_return = PowerSnapshot{};
   sleep_decision_to_return = {PowerService::SleepType::Deep, 60000};
+  last_decide_sleep_mode = OperatingMode::Stationary;
+  last_decide_sleep_ble_link = true;
   enter_sleep_called = false;
   enter_sleep_duration_ms = 0;
   should_hold_pm_result = false;
@@ -305,6 +311,7 @@ SensorManager::~SensorManager() = default;
 void SensorManager::warmup_step(bool /*condition_gas*/) { test_spy::warmup_step_count++; }
 void SensorManager::warmup() {}
 void SensorManager::pm_sleep() { test_spy::pm_sleep_count++; }
+void SensorManager::idle_for_sleep() { test_spy::idle_for_sleep_count++; }
 void SensorManager::pm_wake() {}
 Co2CalibrationResult SensorManager::calibrate_co2() { return Co2CalibrationResult::Unsupported; }
 Co2AbcPeriodResult SensorManager::set_co2_abc_period_days(int days) {
@@ -555,8 +562,11 @@ RtcAppState PowerService::load_state() const { return test_spy::rtc_state; }
 
 PowerService::SleepDecision PowerService::decide_sleep(const GoSettings & /*settings*/,
                                                        LockState /*lock_state*/,
-                                                       OperatingMode /*mode*/,
-                                                       uint32_t /*awake_ms*/) const {
+                                                       OperatingMode mode,
+                                                       uint32_t /*awake_ms*/,
+                                                       bool ble_link_active) const {
+  test_spy::last_decide_sleep_mode = mode;
+  test_spy::last_decide_sleep_ble_link = ble_link_active;
   return test_spy::sleep_decision_to_return;
 }
 

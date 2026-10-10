@@ -104,6 +104,20 @@ public:
   /// @return true on success.
   virtual bool set_charge_current_ma(uint16_t current_ma) = 0;
 
+  /// Enable or disable the charger's telemetry ADC.
+  ///   true  -> continuous conversion (normal operation; telemetry reads
+  ///            need it).
+  ///   false -> ADC off.  Used right before ESP deep sleep so the charger
+  ///            does not keep converting while nobody reads it.  init()
+  ///            re-enables it on the next boot.
+  /// Single I2C write, no policy.  Default for devices without a
+  /// controllable ADC: unsupported.
+  /// @return true on success; false on bus failure or when unsupported.
+  virtual bool set_adc_enabled(bool enabled) {
+    (void)enabled;
+    return false;
+  }
+
   /// Configure the chip-level watchdog timeout.
   ///   timeout_ms == 0 -> watchdog disabled (chip never auto-clears EN_OTG
   ///                      on lost host).

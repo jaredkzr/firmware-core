@@ -42,6 +42,7 @@ See [`go_settings.h`](../main/go_settings.h) for full signatures.
 | `gps_mode` | `"gpm"` | `int` (stored) / `GpsMode` (in struct) | `OnWhenTracking` (1) | 0 .. 2 | GPS operating mode: AlwaysOff / OnWhenTracking / AlwaysOn |
 | `operating_mode` | `"opm"` | `int` (stored) / `OperatingMode` (in struct) | `Portable` (0) | 0 .. 2 | Serialized as int; cast to `OperatingMode` on load |
 | `auto_lock_seconds` | `"als"` | `int` | `10` | 0, 10, 30, 60 | Runtime auto-lock timeout; `0` = disabled |
+| `portable_sleep_enabled` | `"psl"` | `bool` | `false` | — | Portable only: deep-sleep between measurements while locked and no BLE central is connected. See [Portable Sleep](power_management.md#portable-sleep) |
 | `disable_cloud` | `"dc"` | `bool` | `false` | — | Outbound cloud transport kill switch. Suppresses POST, FETCH, and Stationary OTA checks; does not disable the local API. |
 | `configuration_control` | `"cc"` | `int` (stored) / `ConfigurationControl` (in struct) | `Both` (2) | 0 .. 2 | Remote configuration authority: `Cloud`, `Local`, or `Both`. Does not control measurement POST. |
 | `co2_abc_days` | `"cad"` | `int` | `7` | -1 or 1 .. 200 | Automatic background calibration period. `-1` disables it; positive values are applied as 24 hours per day to supported S12 and SCD41 CO2 sensors. |
