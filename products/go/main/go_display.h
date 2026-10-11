@@ -449,7 +449,6 @@ private:
   void _draw_pairing_passkey(const DisplayValues &v);
   void _draw_chart(const DisplayValues &v, int plot_x, int plot_y, int plot_w, int plot_h);
   void _draw_chart_panel(const DisplayValues &v);
-  void _draw_chart_span(const DisplayValues &v);
   void _draw_info(const DisplayValues &v);
   void _draw_provisioning(const DisplayValues &v);
   void _draw_provisioning_confirm(const DisplayValues &v);

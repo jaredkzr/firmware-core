@@ -578,20 +578,17 @@ Screen dispatch:
   directly by `FgLearningRunner` (no `UIManager`). See
   [`fg_learning.md`](fg_learning.md).
 - **Home:** Hero blocks (PM2.5, CO2 with dual-font labels centered via
-  `u8g2_GetStrWidth()`) + 3-row grid (Temp/Humidity, TVOC/NOx or
-  Min/Max, Pressure/Altitude or chart). Grid dividers span full 128 px;
-  1st divider is always 2 px thick, 3rd is 2 px thick when chart is
-  visible. Selecting PM2.5 or CO2 highlights its hero block full width and
-  shows Min/Max in row 2 and the chart in row 3. Selecting a grid metric
-  (Temperature, Humidity, TVOC, NOx, Pressure, Altitude) replaces all three
-  grid rows with a chart panel: an inverted title band (y=164..180) with the
-  metric name and current value, a Min/Max line (values without units; the
-  title carries the unit), a 40 px plot (y=199..238), and a time axis at
-  baseline y=248: the oldest plotted sample's age on the left (up to `-4h`) and
-  the newest on the right (`now` under one minute, else `-2h`). With no
-  plottable samples the panel shows "No history yet". PM2.5/CO2 charts keep
-  their 25 px plot and show a clock glyph (Siji `0xE016`) plus the span
-  (`15m`) right-aligned on the Max cell's label line. Spans render as `48s`,
+  `u8g2_GetStrWidth()`) + 3-row grid (Temp/Humidity, TVOC/NOx,
+  Pressure/Altitude). Grid dividers span full 128 px; the 1st divider is
+  always 2 px thick. Selecting any metric (PM2.5, CO2, Temperature, Humidity,
+  TVOC, NOx, Pressure, Altitude) replaces all three grid rows with a chart
+  panel: an inverted title band (y=164..180) with the metric name (PM2.5 and
+  CO2 include their unit, `(ug/m3)`/`(USAQI)` and `(ppm)`) and current value,
+  a Min/Max line (values without units; the title carries the unit), a 40 px
+  plot (y=199..238), and a time axis at baseline y=248: the oldest plotted
+  sample's age on the left (up to `-4h`) and the newest on the right (`now`
+  under one minute, else `-2h`). The hero blocks stay as they are. With no
+  plottable samples the panel shows "No history yet". Spans render as `48s`,
   `15m`, or `4h`. Time labels are omitted when the clock is unknown. The
   polyline interpolates between samples and breaks at NaN gaps.
   Logo removed from home page (kept for display-off only).

@@ -561,12 +561,8 @@ constexpr int ELLIPSE_CY = 8;
 constexpr int LINK_CY = 5;
 
 // Home screen: hero blocks
-constexpr int PM_BLOCK_Y = 18;
-constexpr int PM_BLOCK_H = 72;
 constexpr int PM_LABEL_BASELINE_Y = 44;
 constexpr int PM_VALUE_BASELINE_Y = 84;
-constexpr int CO2_BLOCK_Y = 90;
-constexpr int CO2_BLOCK_H = 72;
 constexpr int CO2_LABEL_NAME_BASELINE_Y = 112;
 constexpr int CO2_LABEL_UNIT_BASELINE_Y = 113;
 constexpr int CO2_VALUE_BASELINE_Y = 153;
@@ -602,13 +598,11 @@ constexpr int PAIRING_DIVIDER_Y = 86;
 constexpr int PAIRING_PASSKEY_BASELINE_Y = 145;
 constexpr int PAIRING_HINT_BASELINE_Y = 180;
 
-// Chart — shifted 1px down for 2px-thick 3rd grid divider when active
+// Chart plot width, shared by every chart.
 constexpr int PLOT_X = 4;
-constexpr int PLOT_Y = 225;
 constexpr int PLOT_W = 121; // x=4..124 → 121 pixels
-constexpr int PLOT_H = 25;  // y=225..248 → 25 pixels
 
-// Chart panel — a selected grid metric replaces all three grid rows
+// Chart panel — any selected metric replaces all three grid rows
 // (y=164..249): inverted title band, Min/Max line, then a tall plot.
 constexpr int CHART_PANEL_TITLE_Y = 164;
 constexpr int CHART_PANEL_TITLE_H = 17; // y=164..180
@@ -621,9 +615,6 @@ constexpr int CHART_PANEL_PLOT_Y = 199;
 constexpr int CHART_PANEL_PLOT_H = 40;             // y=199..238
 constexpr int CHART_PANEL_TIME_BASELINE_Y = 248;   // "-15m ... now" under the plot
 constexpr int CHART_RIGHT_X = PLOT_X + PLOT_W - 1; // right edge of every plot
-// Hero (PM2.5/CO2) charts: clock + span on the Max cell's label line.
-constexpr int CHART_SPAN_BASELINE_Y = 205; // == GRID_LABEL_Y[3]
-constexpr int CHART_SPAN_GLYPH_GAP = 2;
 // Newest sample younger than this is labelled "now" (one-minute resolution).
 constexpr uint32_t CHART_NOW_THRESHOLD_S = 60;
 constexpr int CHART_PANEL_EMPTY_BASELINE_Y = 228;
@@ -719,27 +710,8 @@ bool is_menu_navigation_screen(Screen screen) {
   return is_navigable(screen) && screen != Screen::Home;
 }
 
-bool metric_has_chart(Metric metric) { return metric != Metric::None; }
-
-// Grid metrics replace the whole grid with the chart panel so the charted value
-// stays visible. Hero metrics (PM2.5, CO2) keep their value in the hero block
-// and chart in the grid's bottom two rows.
-bool metric_uses_chart_panel(Metric metric) {
-  switch (metric) {
-  case Metric::Temp:
-  case Metric::Humidity:
-  case Metric::Tvoc:
-  case Metric::Nox:
-  case Metric::Pressure:
-  case Metric::Altitude:
-    return true;
-  case Metric::None:
-  case Metric::Pm25:
-  case Metric::Co2:
-  default:
-    return false;
-  }
-}
+// Every selected metric replaces the whole grid with the chart panel.
+bool metric_uses_chart_panel(Metric metric) { return metric != Metric::None; }
 
 const char *refresh_mode_name(RefreshMode mode) {
   switch (mode) {
@@ -987,9 +959,12 @@ bool chart_ages_known(const DisplayValues &v) {
          v.chart_newest_age_s != TRACKING_TIME_INVALID_S;
 }
 
-
-const char *chart_panel_title(Metric metric) {
+const char *chart_panel_title(Metric metric, bool pm_use_usaqi) {
   switch (metric) {
+  case Metric::Pm25:
+    return pm_use_usaqi ? "PM2.5 (USAQI)" : "PM2.5 (ug/m3)";
+  case Metric::Co2:
+    return "CO2 (ppm)";
   case Metric::Temp:
     return "Temperature";
   case Metric::Humidity:
@@ -1010,6 +985,12 @@ const char *chart_panel_title(Metric metric) {
 // Current value shown in the chart panel title band, formatted as in the grid.
 void format_chart_panel_value(char *out, size_t out_size, const DisplayValues &v) {
   switch (v.active_metric) {
+  case Metric::Pm25:
+    format_pm_value(out, out_size, v.pm25_ugm3, v.pm_use_usaqi);
+    break;
+  case Metric::Co2:
+    format_co2_value(out, out_size, v.co2_ppm);
+    break;
   case Metric::Temp:
     format_temperature_cell(out, out_size, v.temperature_c, v.use_fahrenheit);
     break;
@@ -1064,7 +1045,6 @@ constexpr uint16_t WIFI_GLYPH_DISCONNECTED = 57879; // 0xE217
 constexpr uint16_t PLUG_GLYPH = 57410;
 
 // Outline clock (8x8) from u8g2_font_siji_t_6x10, marking a chart's time span.
-constexpr uint16_t CLOCK_GLYPH = 57366; // 0xE016
 constexpr uint16_t BATTERY_GLYPH_CHARGING = 57914;
 constexpr uint16_t BATTERY_GLYPH_LVL_0_10 = 57932;
 constexpr uint16_t BATTERY_GLYPH_LVL_10_30 = 57933;
@@ -1835,10 +1815,6 @@ void DisplayService::_draw_home(const DisplayValues &v) {
   }
 
   const bool chart_panel = metric_uses_chart_panel(v.active_metric);
-  // Hero metrics (PM2.5, CO2) chart inside the grid's bottom two rows.
-  const bool grid_chart = metric_has_chart(v.active_metric) && !chart_panel;
-  const bool pm_selected = (v.active_metric == Metric::Pm25);
-  const bool co2_selected = (v.active_metric == Metric::Co2);
 
   // --- Grid dividers (full 128px width) ---
   // 1st divider: always 2px thick (also the chart panel's top border)
@@ -1846,37 +1822,13 @@ void DisplayService::_draw_home(const DisplayValues &v) {
   u8g2_DrawHLine(&_u8g2, 0, GRID_DIVIDER_0_Y + 1, SCREEN_W);
   if (!chart_panel) {
     u8g2_DrawHLine(&_u8g2, 0, GRID_DIVIDER_1_Y, SCREEN_W);
-    // 3rd divider: 2px thick when chart visible, 1px otherwise
     u8g2_DrawHLine(&_u8g2, 0, GRID_DIVIDER_2_Y, SCREEN_W);
-    if (grid_chart) {
-      u8g2_DrawHLine(&_u8g2, 0, GRID_DIVIDER_2_Y + 1, SCREEN_W);
-    }
-
-    // Vertical divider
-    if (grid_chart) {
-      // Only rows 1–2 when chart active
-      u8g2_DrawVLine(&_u8g2, GRID_DIVIDER_X, GRID_DIVIDER_0_Y,
-                     GRID_DIVIDER_2_Y - GRID_DIVIDER_0_Y);
-    } else {
-      // All 3 rows
-      u8g2_DrawVLine(&_u8g2, GRID_DIVIDER_X, GRID_DIVIDER_0_Y, 249 - GRID_DIVIDER_0_Y);
-    }
-  }
-
-  // --- Selection rectangles (filled black with white text) ---
-  if (pm_selected) {
-    u8g2_DrawBox(&_u8g2, 0, PM_BLOCK_Y, SCREEN_W, PM_BLOCK_H);
-  }
-  if (co2_selected) {
-    u8g2_DrawBox(&_u8g2, 0, CO2_BLOCK_Y, SCREEN_W, CO2_BLOCK_H);
+    u8g2_DrawVLine(&_u8g2, GRID_DIVIDER_X, GRID_DIVIDER_0_Y, 249 - GRID_DIVIDER_0_Y);
   }
 
   char buf[24];
 
   // --- PM2.5 hero section ---
-  if (pm_selected)
-    u8g2_SetDrawColor(&_u8g2, 1);
-
   // Dual-font label: "PM2.5" in Logisoso16 + "(ug/m3)" or "(USAQI)" in HelvR12
   {
     const char *pm_name = "PM2.5";
@@ -1900,13 +1852,7 @@ void DisplayService::_draw_home(const DisplayValues &v) {
   format_pm_value(buf, sizeof(buf), v.pm25_ugm3, v.pm_use_usaqi);
   draw_centered_text(&_u8g2, SCREEN_W / 2, PM_VALUE_BASELINE_Y, buf);
 
-  if (pm_selected)
-    u8g2_SetDrawColor(&_u8g2, 0);
-
   // --- CO2 hero section ---
-  if (co2_selected)
-    u8g2_SetDrawColor(&_u8g2, 1);
-
   // Dual-font label: "CO2" in Logisoso16 + "(ppm)" in HelvR12
   {
     const char *co2_name = "CO2";
@@ -1930,9 +1876,6 @@ void DisplayService::_draw_home(const DisplayValues &v) {
   format_co2_value(buf, sizeof(buf), v.co2_ppm);
   draw_centered_text(&_u8g2, SCREEN_W / 2, CO2_VALUE_BASELINE_Y, buf);
 
-  if (co2_selected)
-    u8g2_SetDrawColor(&_u8g2, 0);
-
   if (chart_panel) {
     _draw_chart_panel(v);
     return;
@@ -1950,37 +1893,21 @@ void DisplayService::_draw_home(const DisplayValues &v) {
   draw_cell(&_u8g2, 0, "Temperature", temp_buf, true);
   draw_cell(&_u8g2, 1, "Humidity", hum_buf, false);
 
-  // Row 2: TVOC/NOx or Min/Max (conditional)
-  if (grid_chart) {
-    char min_buf[24];
-    char max_buf[24];
-    format_chart_stat(min_buf, sizeof(min_buf), v.active_metric, v.chart_min, v.use_fahrenheit,
-                      v.pm_use_usaqi, v.use_feet);
-    format_chart_stat(max_buf, sizeof(max_buf), v.active_metric, v.chart_max, v.use_fahrenheit,
-                      v.pm_use_usaqi, v.use_feet);
-    draw_cell(&_u8g2, 2, "Min", min_buf, false);
-    draw_cell(&_u8g2, 3, "Max", max_buf, false);
-    _draw_chart_span(v);
-  } else {
-    char tvoc_buf[24];
-    char nox_buf[24];
-    format_int_index_value(tvoc_buf, sizeof(tvoc_buf), v.tvoc_index);
-    format_int_index_value(nox_buf, sizeof(nox_buf), v.nox_index);
-    draw_cell(&_u8g2, 2, "TVOC", tvoc_buf, false);
-    draw_cell(&_u8g2, 3, "NOx", nox_buf, false);
-  }
+  // Row 2: TVOC / NOx
+  char tvoc_buf[24];
+  char nox_buf[24];
+  format_int_index_value(tvoc_buf, sizeof(tvoc_buf), v.tvoc_index);
+  format_int_index_value(nox_buf, sizeof(nox_buf), v.nox_index);
+  draw_cell(&_u8g2, 2, "TVOC", tvoc_buf, false);
+  draw_cell(&_u8g2, 3, "NOx", nox_buf, false);
 
-  // Row 3: Pressure/Altitude or Chart (conditional)
-  if (grid_chart) {
-    _draw_chart(v, PLOT_X, PLOT_Y, PLOT_W, PLOT_H);
-  } else {
-    char pressure_buf[24];
-    char altitude_buf[24];
-    format_pressure_value(pressure_buf, sizeof(pressure_buf), v.pressure_hpa);
-    format_altitude_value(altitude_buf, sizeof(altitude_buf), v.altitude_m, v.use_feet);
-    draw_cell(&_u8g2, 4, "Pressure", pressure_buf, false);
-    draw_cell(&_u8g2, 5, "Altitude", altitude_buf, false);
-  }
+  // Row 3: Pressure / Altitude
+  char pressure_buf[24];
+  char altitude_buf[24];
+  format_pressure_value(pressure_buf, sizeof(pressure_buf), v.pressure_hpa);
+  format_altitude_value(altitude_buf, sizeof(altitude_buf), v.altitude_m, v.use_feet);
+  draw_cell(&_u8g2, 4, "Pressure", pressure_buf, false);
+  draw_cell(&_u8g2, 5, "Altitude", altitude_buf, false);
 }
 
 void DisplayService::_draw_menu_overlay(const DisplayValues &v) {
@@ -2478,7 +2405,7 @@ void DisplayService::_draw_chart_panel(const DisplayValues &v) {
   u8g2_SetDrawColor(&_u8g2, 1);
   u8g2_SetFont(&_u8g2, u8g2_font_helvB08_tf);
   draw_text(&_u8g2, CHART_PANEL_LEFT_X, CHART_PANEL_TITLE_BASELINE_Y,
-            chart_panel_title(v.active_metric));
+            chart_panel_title(v.active_metric, v.pm_use_usaqi));
   char value_buf[24];
   format_chart_panel_value(value_buf, sizeof(value_buf), v);
   const int value_w = static_cast<int>(u8g2_GetUTF8Width(&_u8g2, value_buf));
@@ -2534,24 +2461,6 @@ void DisplayService::_draw_chart_panel(const DisplayValues &v) {
     const int right_w = static_cast<int>(u8g2_GetStrWidth(&_u8g2, right_buf));
     draw_text(&_u8g2, CHART_RIGHT_X + 1 - right_w, CHART_PANEL_TIME_BASELINE_Y, right_buf);
   }
-}
-
-void DisplayService::_draw_chart_span(const DisplayValues &v) {
-  // Hero charts are only 25 px tall, so the span rides on the Max cell's
-  // label line instead of an axis row: [clock] 15m, right-aligned.
-  if (v.chart_count == 0 || !chart_ages_known(v)) {
-    return;
-  }
-  char span_buf[12];
-  format_span(span_buf, sizeof(span_buf), v.chart_oldest_age_s);
-  u8g2_SetFont(&_u8g2, u8g2_font_helvR08_tr);
-  const int text_w = static_cast<int>(u8g2_GetStrWidth(&_u8g2, span_buf));
-  const int text_x = CHART_RIGHT_X + 1 - text_w;
-  draw_text(&_u8g2, text_x, CHART_SPAN_BASELINE_Y, span_buf);
-  u8g2_SetFont(&_u8g2, u8g2_font_siji_t_6x10);
-  const int glyph_w = static_cast<int>(u8g2_GetGlyphWidth(&_u8g2, CLOCK_GLYPH));
-  u8g2_DrawGlyph(&_u8g2, static_cast<u8g2_uint_t>(text_x - CHART_SPAN_GLYPH_GAP - glyph_w),
-                 static_cast<u8g2_uint_t>(CHART_SPAN_BASELINE_Y), CLOCK_GLYPH);
 }
 
 void DisplayService::_draw_chart(const DisplayValues &v, int plot_x, int plot_y, int plot_w,

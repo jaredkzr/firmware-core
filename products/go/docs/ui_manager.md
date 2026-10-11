@@ -110,7 +110,7 @@ orchestrator what happened:
 | `AckOnboarding` | GettingStarted (boot gate): Enter long press on `Hold Enter to start` | Orchestrator calls `mark_onboarding_done()` then `leave_session_to_home()` if the save succeeds |
 
 Opening the main menu resets the active metric to `None`, clearing any
-hero/grid selection highlight behind the overlay.
+chart panel behind the overlay.
 
 The UI Manager does **not** show snackbars for action-producing dispatches.
 The orchestrator owns all user feedback because it executes the actual
