@@ -612,6 +612,10 @@ uint16_t StorageService::read_cache(MeasuresAGo * /*out*/, uint16_t /*max_count*
   return 0;
 }
 
+uint16_t StorageService::read_cache_times(uint32_t * /*out_s*/, uint16_t /*max_count*/) const {
+  return 0;
+}
+
 uint16_t StorageService::cached_count() const { return 0; }
 
 void StorageService::backup_cache() const { test_spy::cache_backed_up = true; }

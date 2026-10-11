@@ -3335,6 +3335,18 @@ BuildContext Orchestrator::build_context() const {
 
   // Read chart data cache
   uint16_t cache_count = _svc.storage_service.read_cache(_cache_buf, UI_CHART_BUF_SIZE);
+  const uint16_t cache_time_count =
+      _svc.storage_service.read_cache_times(_cache_time_buf, UI_CHART_BUF_SIZE);
+  const bool cache_times_known = cache_count > 0 && cache_time_count == cache_count;
+
+  // One retained-clock read serves both the chart time labels and Tracking
+  // Status, and only when one of them is shown.
+  const bool chart_needs_time =
+      cache_times_known && _svc.ui_manager.active_metric() != Metric::None;
+  const bool status_needs_time = tracking_status_refresh_allowed();
+  const uint32_t now_retained_s = (chart_needs_time || status_needs_time)
+                                      ? tracking_seconds_from_ms(RTOS::get_retained_time_ms())
+                                      : TRACKING_TIME_INVALID_S;
   for (uint16_t i = 0; i < cache_count; ++i) {
     _cache_buf[i] = apply_measurement_corrections(_cache_buf[i], _settings.corrections);
   }
@@ -3353,8 +3365,8 @@ BuildContext Orchestrator::build_context() const {
       (gps_ttff_fixed ? _gps_ttff_ms : (now_ms - _gps_test_entry_ms)) / 1000;
 
   TrackingStatusSnapshot tracking_status{};
-  if (tracking_status_refresh_allowed()) {
-    const uint32_t now_s = tracking_seconds_from_ms(RTOS::get_retained_time_ms());
+  if (status_needs_time) {
+    const uint32_t now_s = now_retained_s;
     tracking_status.recording_s = tracking_recording_s(_tracking_timing, now_s);
     tracking_status.elapsed_s = tracking_elapsed_s(_tracking_timing, now_s);
     tracking_status.last_record_age_s = tracking_last_record_age_s(_tracking_timing, now_s);
@@ -3384,6 +3396,8 @@ BuildContext Orchestrator::build_context() const {
       .pm_use_usaqi = _settings.pm_use_usaqi,
       .cache = _cache_buf,
       .cache_count = static_cast<uint8_t>(cache_count),
+      .cache_times_s = cache_times_known ? _cache_time_buf : nullptr,
+      .now_retained_s = now_retained_s,
       .now_ms = now_ms,
       .gps_data = &_latest_gps,
       .gps_ttff_secs = gps_ttff_secs,

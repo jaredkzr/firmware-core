@@ -125,10 +125,17 @@ static constexpr uint8_t PAGE_SIZE = 8;
 /// Sentinel deadline: snackbar was just shown, not yet armed.
 static constexpr uint32_t SNACKBAR_PENDING = UINT32_MAX;
 
-/// Selectable metrics in browse order: None, Pm25, Co2, Temp, Humidity.
-static constexpr Metric METRIC_CYCLE[] = {Metric::None, Metric::Pm25, Metric::Co2, Metric::Temp,
-                                          Metric::Humidity};
-static constexpr uint8_t METRIC_CYCLE_LEN = 5;
+/// Selectable metrics in on-screen order: hero blocks, then the grid rows.
+static constexpr Metric METRIC_CYCLE[] = {
+    Metric::None, Metric::Pm25, Metric::Co2,      Metric::Temp,     Metric::Humidity,
+    Metric::Tvoc, Metric::Nox,  Metric::Pressure, Metric::Altitude,
+};
+static constexpr uint8_t METRIC_CYCLE_LEN = sizeof(METRIC_CYCLE) / sizeof(METRIC_CYCLE[0]);
+
+/// Sensirion VOC/NOx gas-index outputs stay within 0..500. Larger values in the
+/// index fields are raw SRAW ticks cached by older firmware, which copied them
+/// there on deep-sleep wakes; the chart skips them rather than mix the scales.
+static constexpr int GAS_INDEX_MAX = 500;
 
 // ---------------------------------------------------------------------------
 // Helpers
@@ -342,11 +349,11 @@ DisplayValues UIManager::build_values(const BuildContext &ctx) const {
   // --- Populate rows based on current screen ---
   switch (_screen) {
   case Screen::Home:
-    populate_chart(v, ctx.cache, ctx.cache_count);
+    populate_chart(v, ctx);
     break;
   case Screen::MainMenu:
     populate_menu_rows(v);
-    populate_chart(v, ctx.cache, ctx.cache_count);
+    populate_chart(v, ctx);
     break;
   case Screen::TrackingMenu:
     populate_tracking_rows(v);
@@ -2219,8 +2226,11 @@ void UIManager::populate_accel_test_rows(DisplayValues &v, const BuildContext &c
 // Chart extraction
 // ---------------------------------------------------------------------------
 
-void UIManager::populate_chart(DisplayValues &v, const MeasuresAGo *cache,
-                               uint8_t cache_count) const {
+void UIManager::populate_chart(DisplayValues &v, const BuildContext &ctx) const {
+  const MeasuresAGo *cache = ctx.cache;
+  const uint8_t cache_count = ctx.cache_count;
+  v.chart_oldest_age_s = TRACKING_TIME_INVALID_S;
+  v.chart_newest_age_s = TRACKING_TIME_INVALID_S;
   if (_active_metric == Metric::None || cache == nullptr || cache_count == 0) {
     v.chart_samples = nullptr;
     v.chart_count = 0;
@@ -2228,6 +2238,8 @@ void UIManager::populate_chart(DisplayValues &v, const MeasuresAGo *cache,
   }
 
   uint8_t valid_count = 0;
+  uint8_t first_index = 0;
+  uint8_t last_index = 0;
   float min_val = 0.0f;
   float max_val = 0.0f;
   bool first = true;
@@ -2262,14 +2274,27 @@ void UIManager::populate_chart(DisplayValues &v, const MeasuresAGo *cache,
       }
       break;
     case Metric::Tvoc:
-      if (cache[i].tvoc_nox.tvoc_index != MeasuresInvalid::TVOC) {
+      if (cache[i].tvoc_nox.is_tvoc_index_valid() &&
+          cache[i].tvoc_nox.tvoc_index <= GAS_INDEX_MAX) {
         sample = static_cast<float>(cache[i].tvoc_nox.tvoc_index);
         valid = true;
       }
       break;
     case Metric::Nox:
-      if (cache[i].tvoc_nox.nox_index != MeasuresInvalid::NOX) {
+      if (cache[i].tvoc_nox.is_nox_index_valid() && cache[i].tvoc_nox.nox_index <= GAS_INDEX_MAX) {
         sample = static_cast<float>(cache[i].tvoc_nox.nox_index);
+        valid = true;
+      }
+      break;
+    case Metric::Pressure:
+      if (cache[i].pressure.is_pressure_valid()) {
+        sample = cache[i].pressure.pressure;
+        valid = true;
+      }
+      break;
+    case Metric::Altitude:
+      if (cache[i].pressure.is_altitude_valid()) {
+        sample = cache[i].pressure.altitude;
         valid = true;
       }
       break;
@@ -2279,6 +2304,10 @@ void UIManager::populate_chart(DisplayValues &v, const MeasuresAGo *cache,
     }
 
     if (valid) {
+      if (valid_count == 0) {
+        first_index = i;
+      }
+      last_index = i;
       _chart_buf[valid_count] = sample;
       if (first) {
         min_val = sample;
@@ -2298,4 +2327,16 @@ void UIManager::populate_chart(DisplayValues &v, const MeasuresAGo *cache,
   v.chart_count = valid_count;
   v.chart_min = (valid_count > 0) ? min_val : 0.0f;
   v.chart_max = (valid_count > 0) ? max_val : 0.0f;
+
+  // Ages of the plotted endpoints, so the labels describe the span actually
+  // drawn (e.g. a TVOC chart that skipped deep-sleep samples).
+  if (valid_count > 0 && ctx.cache_times_s != nullptr &&
+      ctx.now_retained_s != TRACKING_TIME_INVALID_S) {
+    const uint32_t oldest_s = ctx.cache_times_s[first_index];
+    const uint32_t newest_s = ctx.cache_times_s[last_index];
+    if (oldest_s <= newest_s && newest_s <= ctx.now_retained_s) {
+      v.chart_oldest_age_s = ctx.now_retained_s - oldest_s;
+      v.chart_newest_age_s = ctx.now_retained_s - newest_s;
+    }
+  }
 }

@@ -492,15 +492,15 @@ TEST_CASE("UIManager: metric cycling on Home", "[UIManager][metric]") {
     CHECK(v.active_metric == Metric::Pm25);
   }
 
-  SECTION("TouchUp from None wraps to Humidity") {
-    press(ui, InputSource::TouchUp); // None → Humidity (wraps backward)
+  SECTION("TouchUp from None wraps to Altitude") {
+    press(ui, InputSource::TouchUp); // None → Altitude (wraps backward)
 
     auto ctx = make_default_ctx();
     DisplayValues v = ui.build_values(ctx);
-    CHECK(v.active_metric == Metric::Humidity);
+    CHECK(v.active_metric == Metric::Altitude);
   }
 
-  SECTION("full forward cycle: None → Pm25 → Co2 → Temp → Humidity → None") {
+  SECTION("full forward cycle follows on-screen order and wraps to None") {
     auto check_metric = [&](Metric expected) {
       auto ctx = make_default_ctx();
       DisplayValues v = ui.build_values(ctx);
@@ -516,6 +516,14 @@ TEST_CASE("UIManager: metric cycling on Home", "[UIManager][metric]") {
     check_metric(Metric::Temp);
     press(ui, InputSource::TouchDown);
     check_metric(Metric::Humidity);
+    press(ui, InputSource::TouchDown);
+    check_metric(Metric::Tvoc);
+    press(ui, InputSource::TouchDown);
+    check_metric(Metric::Nox);
+    press(ui, InputSource::TouchDown);
+    check_metric(Metric::Pressure);
+    press(ui, InputSource::TouchDown);
+    check_metric(Metric::Altitude);
     press(ui, InputSource::TouchDown);
     check_metric(Metric::None); // wraps
   }
@@ -1539,6 +1547,129 @@ TEST_CASE("UIManager: chart extraction from MeasuresAGo cache", "[UIManager][cha
     CHECK(v.chart_count == 2); // only 2 valid
     CHECK(v.chart_min == Catch::Approx(10.0f));
     CHECK(v.chart_max == Catch::Approx(20.0f));
+  }
+
+  // Press TouchDown from None until the target metric is active.
+  const auto select_metric = [&](Metric target) {
+    for (int i = 0; i < 16 && ui.build_values(make_default_ctx()).active_metric != target; ++i) {
+      press(ui, InputSource::TouchDown);
+    }
+    REQUIRE(ui.build_values(make_default_ctx()).active_metric == target);
+  };
+
+  SECTION("TVOC chart skips raw fast-path placeholders") {
+    select_metric(Metric::Tvoc);
+
+    MeasuresAGo cache[4]{};
+    cache[0].tvoc_nox.tvoc_index = 100;
+    cache[1].tvoc_nox.tvoc_index = 29806; // raw SRAW ticks from a deep-sleep wake
+    cache[2].tvoc_nox.tvoc_index = 140;
+    cache[3].tvoc_nox.tvoc_index = MeasuresInvalid::TVOC;
+
+    auto ctx = make_default_ctx();
+    ctx.cache = cache;
+    ctx.cache_count = 4;
+
+    DisplayValues v = ui.build_values(ctx);
+    CHECK(v.chart_count == 2);
+    CHECK(v.chart_min == Catch::Approx(100.0f));
+    CHECK(v.chart_max == Catch::Approx(140.0f));
+  }
+
+  SECTION("NOx chart with only placeholders has no data") {
+    select_metric(Metric::Nox);
+
+    MeasuresAGo cache[2]{};
+    cache[0].tvoc_nox.nox_index = 16519;
+    cache[1].tvoc_nox.nox_index = 16375;
+
+    auto ctx = make_default_ctx();
+    ctx.cache = cache;
+    ctx.cache_count = 2;
+
+    DisplayValues v = ui.build_values(ctx);
+    CHECK(v.chart_count == 0);
+    CHECK(v.chart_samples == nullptr);
+  }
+
+  SECTION("chart ages describe the plotted endpoints") {
+    select_metric(Metric::Tvoc);
+
+    MeasuresAGo cache[4]{};
+    cache[0].tvoc_nox.tvoc_index = MeasuresInvalid::TVOC; // deep-sleep wake: no index
+    cache[1].tvoc_nox.tvoc_index = 100;
+    cache[2].tvoc_nox.tvoc_index = 120;
+    cache[3].tvoc_nox.tvoc_index = MeasuresInvalid::TVOC;
+    const uint32_t times[4] = {1000, 1600, 2200, 2800};
+
+    auto ctx = make_default_ctx();
+    ctx.cache = cache;
+    ctx.cache_count = 4;
+    ctx.cache_times_s = times;
+    ctx.now_retained_s = 2830;
+
+    DisplayValues v = ui.build_values(ctx);
+    CHECK(v.chart_count == 2);
+    CHECK(v.chart_oldest_age_s == 2830 - 1600); // first plotted, not first cached
+    CHECK(v.chart_newest_age_s == 2830 - 2200);
+  }
+
+  SECTION("chart ages are unknown without cache times") {
+    select_metric(Metric::Pm25);
+
+    MeasuresAGo cache[2]{};
+    cache[0].pm_a.pm_25 = 10.0f;
+    cache[1].pm_a.pm_25 = 20.0f;
+
+    auto ctx = make_default_ctx();
+    ctx.cache = cache;
+    ctx.cache_count = 2;
+    ctx.now_retained_s = 500;
+
+    DisplayValues v = ui.build_values(ctx);
+    CHECK(v.chart_count == 2);
+    CHECK(v.chart_oldest_age_s == TRACKING_TIME_INVALID_S);
+    CHECK(v.chart_newest_age_s == TRACKING_TIME_INVALID_S);
+  }
+
+  SECTION("chart ages are unknown when cache times run ahead of the clock") {
+    select_metric(Metric::Pm25);
+
+    MeasuresAGo cache[1]{};
+    cache[0].pm_a.pm_25 = 10.0f;
+    const uint32_t times[1] = {900};
+
+    auto ctx = make_default_ctx();
+    ctx.cache = cache;
+    ctx.cache_count = 1;
+    ctx.cache_times_s = times;
+    ctx.now_retained_s = 100; // retained clock restarted after the samples
+
+    DisplayValues v = ui.build_values(ctx);
+    CHECK(v.chart_oldest_age_s == TRACKING_TIME_INVALID_S);
+  }
+
+  SECTION("Pressure and Altitude charts use the cached pressure data") {
+    MeasuresAGo cache[3]{};
+    cache[0].pressure = {998.5f, 120.0f};
+    cache[1].pressure = {MeasuresInvalid::PRESSURE, MeasuresInvalid::ALTITUDE};
+    cache[2].pressure = {999.5f, 112.0f};
+
+    auto ctx = make_default_ctx();
+    ctx.cache = cache;
+    ctx.cache_count = 3;
+
+    select_metric(Metric::Pressure);
+    DisplayValues v = ui.build_values(ctx);
+    CHECK(v.chart_count == 2);
+    CHECK(v.chart_min == Catch::Approx(998.5f));
+    CHECK(v.chart_max == Catch::Approx(999.5f));
+
+    select_metric(Metric::Altitude);
+    v = ui.build_values(ctx);
+    CHECK(v.chart_count == 2);
+    CHECK(v.chart_min == Catch::Approx(112.0f));
+    CHECK(v.chart_max == Catch::Approx(120.0f));
   }
 }
 

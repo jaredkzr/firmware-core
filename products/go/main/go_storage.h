@@ -127,6 +127,16 @@ public:
   ///                   (= min(cached_count(), max_count)).
   uint16_t read_cache(MeasuresAGo *out, uint16_t max_count) const;
 
+  /// Copy the push time of each cached entry (oldest first, aligned with
+  /// read_cache()) in retained-clock seconds (RTOS::get_retained_time_ms(),
+  /// which keeps counting through deep sleep).
+  ///
+  /// @return Number of times written, or 0 when the times do not cover every
+  ///         cached entry (for example after a reset that kept the cache but
+  ///         not its times). Callers then omit time labels; alignment returns
+  ///         once the cache has been fully refilled.
+  uint16_t read_cache_times(uint32_t *out_s, uint16_t max_count) const;
+
   /// Number of cached measurements currently held in the ring buffer.
   uint16_t cached_count() const;
 
@@ -238,6 +248,16 @@ public:
 
 private:
   PayloadCache &_cache;
+
+  // Push times of the cached entries, oldest first, newest-aligned with
+  // _cache. Backed up to RTC memory alongside the cache.
+  uint32_t _cache_time_s[PAYLOAD_CACHE_MAX_SIZE] = {};
+  uint16_t _cache_time_count = 0;
+
+  void _push_cache_time(uint32_t time_s);
+  void _trim_cache_times();
+  void _backup_cache_times() const;
+  void _restore_cache_times();
   NandStorage &_nand;
 
   FILE *_route_file = nullptr;

@@ -36,10 +36,17 @@ power-off). Called synchronously by the orchestrator — no independent task.
 | Stored type | `MeasuresAGo` (`CONFIG_PAYLOAD_CACHE_TYPE_AGO`) |
 | Capacity | `PAYLOAD_CACHE_MAX_SIZE` (default 16, configurable via Kconfig) |
 
-The cache delegates entirely to `PayloadCache`. `StorageService` adds no
-extra logic — `cache_measurement()` calls `push()`,
-`backup_cache()`/`restore_cache()` call `backup()`/`restore()`, and
-`clear_cache()` calls `clean()`.
+The cache delegates storage of the entries to `PayloadCache`:
+`cache_measurement()` calls `push()`, `backup_cache()`/`restore_cache()` call
+`backup()`/`restore()`, and `clear_cache()` calls `clean()`.
+
+`StorageService` also records when each entry was pushed, in retained-clock
+seconds (`RTOS::get_retained_time_ms()`, which keeps counting through deep
+sleep), for the chart time labels. The times are newest-aligned with the
+entries, trimmed to `cached_count()` (the ring holds one fewer entry than its
+slot count), and backed up to RTC memory with the cache. `read_cache_times()`
+returns them only when they cover every cached entry. Otherwise it returns 0
+and the charts omit their time labels until the cache has refilled.
 
 ### Persistent (Route Data)
 
@@ -129,6 +136,7 @@ wake if the previous chart data should be recovered.
 |---|---|
 | `cache_measurement(m)` | Push `MeasuresAGo` into the ring buffer. Overwrites the oldest entry when full. |
 | `read_cached_field(field, out, max_count)` | Fill `out[]` with the history of one field across all cached entries, oldest-first. Returns the number of values written. |
+| `read_cache_times(out_s, max_count)` | Fill `out_s[]` with each entry's push time (retained-clock seconds), aligned with `read_cache()`. Returns 0 when the times do not cover every entry. |
 | `cached_count()` | Number of measurements currently in the buffer. |
 | `backup_cache()` | Persist the ring buffer to RTC memory. Call before deep sleep. |
 | `restore_cache()` | Reload the ring buffer from RTC memory. Call after deep sleep wake. |

@@ -588,6 +588,27 @@ constexpr int PLOT_Y = 225;
 constexpr int PLOT_W = 121; // x=4..124 → 121 pixels
 constexpr int PLOT_H = 25;  // y=225..248 → 25 pixels
 
+// Chart panel — a selected grid metric replaces all three grid rows
+// (y=164..249): inverted title band, Min/Max line, then a tall plot.
+constexpr int CHART_PANEL_TITLE_Y = 164;
+constexpr int CHART_PANEL_TITLE_H = 17; // y=164..180
+constexpr int CHART_PANEL_TITLE_BASELINE_Y = 177;
+constexpr int CHART_PANEL_LEFT_X = 7;   // matches the left grid column inset
+constexpr int CHART_PANEL_RIGHT_X = 68; // matches the right grid column inset
+constexpr int CHART_PANEL_VALUE_RIGHT_X = SCREEN_W - 7;
+constexpr int CHART_PANEL_STATS_BASELINE_Y = 194;
+constexpr int CHART_PANEL_PLOT_Y = 199;
+constexpr int CHART_PANEL_PLOT_H = 40;             // y=199..238
+constexpr int CHART_PANEL_TIME_BASELINE_Y = 248;   // "-15m ... now" under the plot
+constexpr int CHART_RIGHT_X = PLOT_X + PLOT_W - 1; // right edge of every plot
+// Hero (PM2.5/CO2) charts: clock + span on the Max cell's label line.
+constexpr int CHART_SPAN_BASELINE_Y = 205; // == GRID_LABEL_Y[3]
+constexpr int CHART_SPAN_GLYPH_GAP = 2;
+// Newest sample younger than this is labelled "now" (one-minute resolution).
+constexpr uint32_t CHART_NOW_THRESHOLD_S = 60;
+constexpr int CHART_PANEL_EMPTY_BASELINE_Y = 228;
+constexpr int CHART_PANEL_LABEL_GAP = 3;
+
 // Snackbar (unchanged)
 constexpr int SNACKBAR_Y = 232;
 constexpr int SNACKBAR_H = 18;
@@ -605,15 +626,6 @@ constexpr int GRID_LABEL_Y[6] = {175, 175, 205, 205, 235, 235};
 constexpr int GRID_VALUE_X[6] = {7, 68, 7, 68, 7, 68};
 constexpr int GRID_VALUE_Y[6] = {187, 187, 217, 217, 247, 247};
 
-// Selection rectangles — shifted 1px down for 2px-thick 1st grid divider
-constexpr int SEL_TEMP_X = 0;
-constexpr int SEL_TEMP_Y = 164;
-constexpr int SEL_TEMP_W = 64;
-constexpr int SEL_TEMP_H = 28;
-constexpr int SEL_HUM_X = 64;
-constexpr int SEL_HUM_Y = 164;
-constexpr int SEL_HUM_W = 64;
-constexpr int SEL_HUM_H = 28;
 
 // ---------------------------------------------------------------------------
 // u8g2 virtual display callback — provides geometry info only
@@ -687,6 +699,26 @@ bool is_menu_navigation_screen(Screen screen) {
 }
 
 bool metric_has_chart(Metric metric) { return metric != Metric::None; }
+
+// Grid metrics replace the whole grid with the chart panel so the charted value
+// stays visible. Hero metrics (PM2.5, CO2) keep their value in the hero block
+// and chart in the grid's bottom two rows.
+bool metric_uses_chart_panel(Metric metric) {
+  switch (metric) {
+  case Metric::Temp:
+  case Metric::Humidity:
+  case Metric::Tvoc:
+  case Metric::Nox:
+  case Metric::Pressure:
+  case Metric::Altitude:
+    return true;
+  case Metric::None:
+  case Metric::Pm25:
+  case Metric::Co2:
+  default:
+    return false;
+  }
+}
 
 bool is_float_non_negative(float value) { return value >= 0.0f; }
 
@@ -773,15 +805,6 @@ void format_co2_value(char *out, size_t out_size, int value) {
   snprintf(out, out_size, "%d", value);
 }
 
-void format_temperature_value(char *out, size_t out_size, float celsius, bool use_fahrenheit) {
-  if (!is_temperature_valid(celsius)) {
-    snprintf(out, out_size, "-");
-    return;
-  }
-  const float shown = temp_for_display(celsius, use_fahrenheit);
-  snprintf(out, out_size, "%.1f %c", shown, use_fahrenheit ? 'F' : 'C');
-}
-
 void format_humidity_value(char *out, size_t out_size, float humidity) {
   if (!is_float_non_negative(humidity)) {
     snprintf(out, out_size, "-");
@@ -848,8 +871,20 @@ void format_altitude_value(char *out, size_t out_size, float altitude_m, bool us
   snprintf(out, out_size, "%ld m", rounded_altitude_m);
 }
 
+// Grid temperature text with a UTF-8 degree sign (draw with u8g2_DrawUTF8).
+void format_temperature_cell(char *out, size_t out_size, float celsius, bool use_fahrenheit) {
+  if (!is_temperature_valid(celsius)) {
+    snprintf(out, out_size, "-");
+    return;
+  }
+  const float shown = temp_for_display(celsius, use_fahrenheit);
+  format_one_decimal(out, out_size, shown);
+  const size_t len = strlen(out);
+  snprintf(out + len, out_size - len, " \xC2\xB0%c", use_fahrenheit ? 'F' : 'C');
+}
+
 void format_chart_stat(char *out, size_t out_size, Metric metric, float value, bool use_fahrenheit,
-                       bool pm_use_usaqi) {
+                       bool pm_use_usaqi, bool use_feet) {
   switch (metric) {
   case Metric::Pm25:
     format_pm_value(out, out_size, value, pm_use_usaqi);
@@ -858,7 +893,13 @@ void format_chart_stat(char *out, size_t out_size, Metric metric, float value, b
     format_co2_value(out, out_size, static_cast<int>(lroundf(value)));
     break;
   case Metric::Temp:
-    format_temperature_value(out, out_size, value, use_fahrenheit);
+    // No unit: the chart panel title shows it, and "100.2 F" would overflow
+    // the half-width Max column.
+    if (is_temperature_valid(value)) {
+      format_one_decimal(out, out_size, temp_for_display(value, use_fahrenheit));
+    } else {
+      snprintf(out, out_size, "-");
+    }
     break;
   case Metric::Humidity:
     format_humidity_value(out, out_size, value);
@@ -867,7 +908,89 @@ void format_chart_stat(char *out, size_t out_size, Metric metric, float value, b
   case Metric::Nox:
     format_float_index_value(out, out_size, value);
     break;
+  case Metric::Pressure:
+    // One decimal and no unit: pressure moves by tenths of an hPa, and both
+    // stats must fit their half-width column (the title carries the unit).
+    if (is_float_non_negative(value)) {
+      format_one_decimal(out, out_size, value);
+    } else {
+      snprintf(out, out_size, "-");
+    }
+    break;
+  case Metric::Altitude:
+    format_altitude_value(out, out_size, value, use_feet);
+    break;
   case Metric::None:
+  default:
+    snprintf(out, out_size, "-");
+    break;
+  }
+}
+
+// Compact duration for chart time labels: "48s", "15m", "16h", "3d".
+// Rounds to the nearest unit and promotes 59.5 m to "1h" and 47.5 h to "2d".
+void format_span(char *out, size_t out_size, uint32_t seconds) {
+  constexpr uint32_t MINUTE_S = 60;
+  constexpr uint32_t HOUR_S = 60 * MINUTE_S;
+  constexpr uint32_t DAY_S = 24 * HOUR_S;
+  constexpr uint32_t MAX_HOURS_SHOWN = 48;
+  if (seconds < MINUTE_S) {
+    snprintf(out, out_size, "%" PRIu32 "s", seconds);
+  } else if (seconds < HOUR_S - MINUTE_S / 2) {
+    snprintf(out, out_size, "%" PRIu32 "m", (seconds + MINUTE_S / 2) / MINUTE_S);
+  } else if (seconds < MAX_HOURS_SHOWN * HOUR_S - HOUR_S / 2) {
+    snprintf(out, out_size, "%" PRIu32 "h", (seconds + HOUR_S / 2) / HOUR_S);
+  } else {
+    snprintf(out, out_size, "%" PRIu32 "d", (seconds + DAY_S / 2) / DAY_S);
+  }
+}
+
+bool chart_ages_known(const DisplayValues &v) {
+  return v.chart_oldest_age_s != TRACKING_TIME_INVALID_S &&
+         v.chart_newest_age_s != TRACKING_TIME_INVALID_S;
+}
+
+
+const char *chart_panel_title(Metric metric) {
+  switch (metric) {
+  case Metric::Temp:
+    return "Temperature";
+  case Metric::Humidity:
+    return "Humidity";
+  case Metric::Tvoc:
+    return "TVOC";
+  case Metric::Nox:
+    return "NOx";
+  case Metric::Pressure:
+    return "Pressure";
+  case Metric::Altitude:
+    return "Altitude";
+  default:
+    return "";
+  }
+}
+
+// Current value shown in the chart panel title band, formatted as in the grid.
+void format_chart_panel_value(char *out, size_t out_size, const DisplayValues &v) {
+  switch (v.active_metric) {
+  case Metric::Temp:
+    format_temperature_cell(out, out_size, v.temperature_c, v.use_fahrenheit);
+    break;
+  case Metric::Humidity:
+    format_humidity_value(out, out_size, v.humidity_pct);
+    break;
+  case Metric::Tvoc:
+    format_int_index_value(out, out_size, v.tvoc_index);
+    break;
+  case Metric::Nox:
+    format_int_index_value(out, out_size, v.nox_index);
+    break;
+  case Metric::Pressure:
+    format_pressure_value(out, out_size, v.pressure_hpa);
+    break;
+  case Metric::Altitude:
+    format_altitude_value(out, out_size, v.altitude_m, v.use_feet);
+    break;
   default:
     snprintf(out, out_size, "-");
     break;
@@ -902,6 +1025,9 @@ constexpr uint16_t WIFI_GLYPH_DISCONNECTED = 57879; // 0xE217
 
 // Battery / power glyphs from u8g2_font_siji_t_6x10
 constexpr uint16_t PLUG_GLYPH = 57410;
+
+// Outline clock (8x8) from u8g2_font_siji_t_6x10, marking a chart's time span.
+constexpr uint16_t CLOCK_GLYPH = 57366; // 0xE016
 constexpr uint16_t BATTERY_GLYPH_CHARGING = 57914;
 constexpr uint16_t BATTERY_GLYPH_LVL_0_10 = 57932;
 constexpr uint16_t BATTERY_GLYPH_LVL_10_30 = 57933;
@@ -1623,30 +1749,33 @@ void DisplayService::_draw_home(const DisplayValues &v) {
     return;
   }
 
-  const bool chart_visible = metric_has_chart(v.active_metric);
+  const bool chart_panel = metric_uses_chart_panel(v.active_metric);
+  // Hero metrics (PM2.5, CO2) chart inside the grid's bottom two rows.
+  const bool grid_chart = metric_has_chart(v.active_metric) && !chart_panel;
   const bool pm_selected = (v.active_metric == Metric::Pm25);
   const bool co2_selected = (v.active_metric == Metric::Co2);
-  const bool temp_selected = (v.active_metric == Metric::Temp);
-  const bool hum_selected = (v.active_metric == Metric::Humidity);
 
   // --- Grid dividers (full 128px width) ---
-  // 1st divider: always 2px thick
+  // 1st divider: always 2px thick (also the chart panel's top border)
   u8g2_DrawHLine(&_u8g2, 0, GRID_DIVIDER_0_Y, SCREEN_W);
   u8g2_DrawHLine(&_u8g2, 0, GRID_DIVIDER_0_Y + 1, SCREEN_W);
-  u8g2_DrawHLine(&_u8g2, 0, GRID_DIVIDER_1_Y, SCREEN_W);
-  // 3rd divider: 2px thick when chart visible, 1px otherwise
-  u8g2_DrawHLine(&_u8g2, 0, GRID_DIVIDER_2_Y, SCREEN_W);
-  if (chart_visible) {
-    u8g2_DrawHLine(&_u8g2, 0, GRID_DIVIDER_2_Y + 1, SCREEN_W);
-  }
+  if (!chart_panel) {
+    u8g2_DrawHLine(&_u8g2, 0, GRID_DIVIDER_1_Y, SCREEN_W);
+    // 3rd divider: 2px thick when chart visible, 1px otherwise
+    u8g2_DrawHLine(&_u8g2, 0, GRID_DIVIDER_2_Y, SCREEN_W);
+    if (grid_chart) {
+      u8g2_DrawHLine(&_u8g2, 0, GRID_DIVIDER_2_Y + 1, SCREEN_W);
+    }
 
-  // Vertical divider
-  if (chart_visible) {
-    // Only rows 1–2 when chart active
-    u8g2_DrawVLine(&_u8g2, GRID_DIVIDER_X, GRID_DIVIDER_0_Y, GRID_DIVIDER_2_Y - GRID_DIVIDER_0_Y);
-  } else {
-    // All 3 rows
-    u8g2_DrawVLine(&_u8g2, GRID_DIVIDER_X, GRID_DIVIDER_0_Y, 249 - GRID_DIVIDER_0_Y);
+    // Vertical divider
+    if (grid_chart) {
+      // Only rows 1–2 when chart active
+      u8g2_DrawVLine(&_u8g2, GRID_DIVIDER_X, GRID_DIVIDER_0_Y,
+                     GRID_DIVIDER_2_Y - GRID_DIVIDER_0_Y);
+    } else {
+      // All 3 rows
+      u8g2_DrawVLine(&_u8g2, GRID_DIVIDER_X, GRID_DIVIDER_0_Y, 249 - GRID_DIVIDER_0_Y);
+    }
   }
 
   // --- Selection rectangles (filled black with white text) ---
@@ -1655,12 +1784,6 @@ void DisplayService::_draw_home(const DisplayValues &v) {
   }
   if (co2_selected) {
     u8g2_DrawBox(&_u8g2, 0, CO2_BLOCK_Y, SCREEN_W, CO2_BLOCK_H);
-  }
-  if (temp_selected) {
-    u8g2_DrawBox(&_u8g2, SEL_TEMP_X, SEL_TEMP_Y, SEL_TEMP_W, SEL_TEMP_H);
-  }
-  if (hum_selected) {
-    u8g2_DrawBox(&_u8g2, SEL_HUM_X, SEL_HUM_Y, SEL_HUM_W, SEL_HUM_H);
   }
 
   char buf[24];
@@ -1725,46 +1848,34 @@ void DisplayService::_draw_home(const DisplayValues &v) {
   if (co2_selected)
     u8g2_SetDrawColor(&_u8g2, 0);
 
+  if (chart_panel) {
+    _draw_chart_panel(v);
+    return;
+  }
+
   // --- Grid cells ---
   char temp_buf[24];
   char hum_buf[24];
 
   // Temperature grid cell uses DrawUTF8 for the degree symbol.
-  // format_temperature_value is preserved for chart stats; here we format
-  // with the UTF-8 degree sign for display.
-  if (!is_temperature_valid(v.temperature_c)) {
-    snprintf(temp_buf, sizeof(temp_buf), "-");
-  } else {
-    const float shown = temp_for_display(v.temperature_c, v.use_fahrenheit);
-    format_one_decimal(temp_buf, sizeof(temp_buf), shown);
-    const size_t len = strlen(temp_buf);
-    snprintf(temp_buf + len, sizeof(temp_buf) - len, " \xC2\xB0%c", v.use_fahrenheit ? 'F' : 'C');
-  }
+  format_temperature_cell(temp_buf, sizeof(temp_buf), v.temperature_c, v.use_fahrenheit);
   format_humidity_value(hum_buf, sizeof(hum_buf), v.humidity_pct);
 
-  // Row 1: Temp / Humidity (always visible)
-  if (temp_selected)
-    u8g2_SetDrawColor(&_u8g2, 1);
+  // Row 1: Temp / Humidity
   draw_cell(&_u8g2, 0, "Temperature", temp_buf, true);
-  if (temp_selected)
-    u8g2_SetDrawColor(&_u8g2, 0);
-
-  if (hum_selected)
-    u8g2_SetDrawColor(&_u8g2, 1);
   draw_cell(&_u8g2, 1, "Humidity", hum_buf, false);
-  if (hum_selected)
-    u8g2_SetDrawColor(&_u8g2, 0);
 
   // Row 2: TVOC/NOx or Min/Max (conditional)
-  if (chart_visible) {
+  if (grid_chart) {
     char min_buf[24];
     char max_buf[24];
     format_chart_stat(min_buf, sizeof(min_buf), v.active_metric, v.chart_min, v.use_fahrenheit,
-                      v.pm_use_usaqi);
+                      v.pm_use_usaqi, v.use_feet);
     format_chart_stat(max_buf, sizeof(max_buf), v.active_metric, v.chart_max, v.use_fahrenheit,
-                      v.pm_use_usaqi);
+                      v.pm_use_usaqi, v.use_feet);
     draw_cell(&_u8g2, 2, "Min", min_buf, false);
     draw_cell(&_u8g2, 3, "Max", max_buf, false);
+    _draw_chart_span(v);
   } else {
     char tvoc_buf[24];
     char nox_buf[24];
@@ -1775,8 +1886,8 @@ void DisplayService::_draw_home(const DisplayValues &v) {
   }
 
   // Row 3: Pressure/Altitude or Chart (conditional)
-  if (chart_visible) {
-    _draw_chart(v);
+  if (grid_chart) {
+    _draw_chart(v, PLOT_X, PLOT_Y, PLOT_W, PLOT_H);
   } else {
     char pressure_buf[24];
     char altitude_buf[24];
@@ -2276,32 +2387,115 @@ void DisplayService::_draw_fg_learning_dashboard(const DisplayValues &v) {
   draw_centered_text(&_u8g2, SCREEN_W / 2, 230, buf);
 }
 
-void DisplayService::_draw_chart(const DisplayValues &v) {
+void DisplayService::_draw_chart_panel(const DisplayValues &v) {
+  // Title band (inverted): metric name left, current value right-aligned.
+  u8g2_DrawBox(&_u8g2, 0, CHART_PANEL_TITLE_Y, SCREEN_W, CHART_PANEL_TITLE_H);
+  u8g2_SetDrawColor(&_u8g2, 1);
+  u8g2_SetFont(&_u8g2, u8g2_font_helvB08_tf);
+  draw_text(&_u8g2, CHART_PANEL_LEFT_X, CHART_PANEL_TITLE_BASELINE_Y,
+            chart_panel_title(v.active_metric));
+  char value_buf[24];
+  format_chart_panel_value(value_buf, sizeof(value_buf), v);
+  const int value_w = static_cast<int>(u8g2_GetUTF8Width(&_u8g2, value_buf));
+  u8g2_DrawUTF8(&_u8g2, static_cast<u8g2_uint_t>(CHART_PANEL_VALUE_RIGHT_X - value_w),
+                static_cast<u8g2_uint_t>(CHART_PANEL_TITLE_BASELINE_Y), value_buf);
+  u8g2_SetDrawColor(&_u8g2, 0);
+
+  if (v.chart_samples == nullptr || v.chart_count == 0) {
+    u8g2_SetFont(&_u8g2, u8g2_font_helvR08_tr);
+    draw_centered_text(&_u8g2, SCREEN_W / 2, CHART_PANEL_EMPTY_BASELINE_Y, "No history yet");
+    return;
+  }
+
+  // Min / Max line, aligned with the grid's two columns.
+  char min_buf[24];
+  char max_buf[24];
+  format_chart_stat(min_buf, sizeof(min_buf), v.active_metric, v.chart_min, v.use_fahrenheit,
+                    v.pm_use_usaqi, v.use_feet);
+  format_chart_stat(max_buf, sizeof(max_buf), v.active_metric, v.chart_max, v.use_fahrenheit,
+                    v.pm_use_usaqi, v.use_feet);
+  const struct {
+    int x;
+    const char *label;
+    const char *value;
+  } stats[] = {{CHART_PANEL_LEFT_X, "Min", min_buf}, {CHART_PANEL_RIGHT_X, "Max", max_buf}};
+  for (const auto &stat : stats) {
+    u8g2_SetFont(&_u8g2, u8g2_font_helvR08_tr);
+    draw_text(&_u8g2, stat.x, CHART_PANEL_STATS_BASELINE_Y, stat.label);
+    const int label_w = static_cast<int>(u8g2_GetStrWidth(&_u8g2, stat.label));
+    u8g2_SetFont(&_u8g2, u8g2_font_helvB08_tf);
+    u8g2_DrawUTF8(&_u8g2, static_cast<u8g2_uint_t>(stat.x + label_w + CHART_PANEL_LABEL_GAP),
+                  static_cast<u8g2_uint_t>(CHART_PANEL_STATS_BASELINE_Y), stat.value);
+  }
+
+  _draw_chart(v, PLOT_X, CHART_PANEL_PLOT_Y, PLOT_W, CHART_PANEL_PLOT_H);
+
+  // Time axis: age of the oldest plotted sample on the left, newest on the
+  // right ("now" when it is under a minute old).
+  if (chart_ages_known(v)) {
+    char left_buf[16];
+    char right_buf[16];
+    char span_buf[12];
+    format_span(span_buf, sizeof(span_buf), v.chart_oldest_age_s);
+    snprintf(left_buf, sizeof(left_buf), "-%s", span_buf);
+    if (v.chart_newest_age_s < CHART_NOW_THRESHOLD_S) {
+      snprintf(right_buf, sizeof(right_buf), "now");
+    } else {
+      format_span(span_buf, sizeof(span_buf), v.chart_newest_age_s);
+      snprintf(right_buf, sizeof(right_buf), "-%s", span_buf);
+    }
+    u8g2_SetFont(&_u8g2, u8g2_font_helvR08_tr);
+    draw_text(&_u8g2, PLOT_X, CHART_PANEL_TIME_BASELINE_Y, left_buf);
+    const int right_w = static_cast<int>(u8g2_GetStrWidth(&_u8g2, right_buf));
+    draw_text(&_u8g2, CHART_RIGHT_X + 1 - right_w, CHART_PANEL_TIME_BASELINE_Y, right_buf);
+  }
+}
+
+void DisplayService::_draw_chart_span(const DisplayValues &v) {
+  // Hero charts are only 25 px tall, so the span rides on the Max cell's
+  // label line instead of an axis row: [clock] 15m, right-aligned.
+  if (v.chart_count == 0 || !chart_ages_known(v)) {
+    return;
+  }
+  char span_buf[12];
+  format_span(span_buf, sizeof(span_buf), v.chart_oldest_age_s);
+  u8g2_SetFont(&_u8g2, u8g2_font_helvR08_tr);
+  const int text_w = static_cast<int>(u8g2_GetStrWidth(&_u8g2, span_buf));
+  const int text_x = CHART_RIGHT_X + 1 - text_w;
+  draw_text(&_u8g2, text_x, CHART_SPAN_BASELINE_Y, span_buf);
+  u8g2_SetFont(&_u8g2, u8g2_font_siji_t_6x10);
+  const int glyph_w = static_cast<int>(u8g2_GetGlyphWidth(&_u8g2, CLOCK_GLYPH));
+  u8g2_DrawGlyph(&_u8g2, static_cast<u8g2_uint_t>(text_x - CHART_SPAN_GLYPH_GAP - glyph_w),
+                 static_cast<u8g2_uint_t>(CHART_SPAN_BASELINE_Y), CLOCK_GLYPH);
+}
+
+void DisplayService::_draw_chart(const DisplayValues &v, int plot_x, int plot_y, int plot_w,
+                                 int plot_h_px) {
   // Polyline only — no axes, no border lines.
   if (v.chart_samples == nullptr || v.chart_count == 0)
     return;
 
   const float range = v.chart_max - v.chart_min;
-  const int plot_h = PLOT_H - 1; // drawable height range
-  int prev_x = PLOT_X;
-  int prev_y = PLOT_Y + plot_h / 2;
+  const int plot_h = plot_h_px - 1; // drawable height range
+  int prev_x = plot_x;
+  int prev_y = plot_y + plot_h / 2;
 
-  for (int x = 0; x < PLOT_W; ++x) {
+  for (int x = 0; x < plot_w; ++x) {
     const int sample_index =
-        (x * static_cast<int>(v.chart_count - 1)) / ((PLOT_W > 1) ? (PLOT_W - 1) : 1);
+        (x * static_cast<int>(v.chart_count - 1)) / ((plot_w > 1) ? (plot_w - 1) : 1);
     const float sample = v.chart_samples[sample_index];
 
-    int y = PLOT_Y + plot_h / 2;
+    int y = plot_y + plot_h / 2;
     if (range > 0.001f) {
       const float norm = (sample - v.chart_min) / range;
-      y = PLOT_Y + plot_h - static_cast<int>(norm * static_cast<float>(plot_h));
+      y = plot_y + plot_h - static_cast<int>(norm * static_cast<float>(plot_h));
     }
-    if (y < PLOT_Y)
-      y = PLOT_Y;
-    if (y > PLOT_Y + plot_h)
-      y = PLOT_Y + plot_h;
+    if (y < plot_y)
+      y = plot_y;
+    if (y > plot_y + plot_h)
+      y = plot_y + plot_h;
 
-    const int draw_x = PLOT_X + x;
+    const int draw_x = plot_x + x;
     if (x > 0) {
       u8g2_DrawLine(&_u8g2, prev_x, prev_y, draw_x, y);
     }

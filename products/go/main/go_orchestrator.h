@@ -227,6 +227,7 @@ private:
   // --- Display buffers (mutable for const build_context) ---
   mutable Measures _display_measures{};
   mutable MeasuresAGo _cache_buf[UI_CHART_BUF_SIZE]{};
+  mutable uint32_t _cache_time_buf[UI_CHART_BUF_SIZE]{};
 
   // --- Constants ---
   static constexpr uint32_t BMS_POLL_INTERVAL_MS = 30000;

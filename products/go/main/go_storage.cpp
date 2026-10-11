@@ -18,7 +18,33 @@
 #include <unistd.h>
 
 #include "ag_log.h"
+#include "go_type_helpers.hpp"
 #include "rtos.h"
+
+// RTC_DATA_ATTR keeps the chart-cache times across deep sleep, like the cache
+// itself. Host test builds have no such attribute; define it away.
+#if !defined(TEST_HOST) && defined(__has_include)
+#if __has_include("esp_attr.h")
+#include "esp_attr.h"
+#endif
+#endif
+
+#ifndef RTC_DATA_ATTR
+#define RTC_DATA_ATTR
+#endif
+
+namespace {
+
+struct RtcCacheTimes {
+  uint16_t count;
+  uint32_t time_s[PAYLOAD_CACHE_MAX_SIZE];
+};
+
+// Zero-initialized on power-on: no times, so labels stay hidden until the
+// cache refills.
+RTC_DATA_ATTR RtcCacheTimes s_rtc_cache_times = {};
+
+} // namespace
 
 #ifdef TEST_HOST
 #include <sys/statvfs.h>
@@ -65,7 +91,57 @@ const char *StorageService::mount_path() const { return _nand.mount_path(); }
 // Temporary (chart) operations
 // ---------------------------------------------------------------------------
 
-void StorageService::cache_measurement(const MeasuresAGo &m) { _cache.push(m); }
+void StorageService::cache_measurement(const MeasuresAGo &m) {
+  _cache.push(m); // also backs the cache up to RTC memory
+  _push_cache_time(tracking_seconds_from_ms(RTOS::get_retained_time_ms()));
+  _backup_cache_times();
+}
+
+void StorageService::_push_cache_time(uint32_t time_s) {
+  if (_cache_time_count == PAYLOAD_CACHE_MAX_SIZE) {
+    std::memmove(_cache_time_s, _cache_time_s + 1,
+                 (PAYLOAD_CACHE_MAX_SIZE - 1) * sizeof(_cache_time_s[0]));
+    --_cache_time_count;
+  }
+  _cache_time_s[_cache_time_count++] = time_s;
+  _trim_cache_times();
+}
+
+void StorageService::_trim_cache_times() {
+  // The ring holds at most one fewer entry than its slot count; drop the
+  // oldest times so they stay newest-aligned with the cached entries.
+  const uint16_t cached = cached_count();
+  if (_cache_time_count <= cached) {
+    return;
+  }
+  const uint16_t drop = _cache_time_count - cached;
+  std::memmove(_cache_time_s, _cache_time_s + drop, cached * sizeof(_cache_time_s[0]));
+  _cache_time_count = cached;
+}
+
+void StorageService::_backup_cache_times() const {
+  s_rtc_cache_times.count = _cache_time_count;
+  std::memcpy(s_rtc_cache_times.time_s, _cache_time_s, sizeof(_cache_time_s));
+}
+
+void StorageService::_restore_cache_times() {
+  if (s_rtc_cache_times.count > PAYLOAD_CACHE_MAX_SIZE) {
+    _cache_time_count = 0;
+    return;
+  }
+  _cache_time_count = s_rtc_cache_times.count;
+  std::memcpy(_cache_time_s, s_rtc_cache_times.time_s, sizeof(_cache_time_s));
+  _trim_cache_times();
+}
+
+uint16_t StorageService::read_cache_times(uint32_t *out_s, uint16_t max_count) const {
+  const uint16_t cached = cached_count();
+  if (_cache_time_count != cached || cached > max_count) {
+    return 0;
+  }
+  std::memcpy(out_s, _cache_time_s, cached * sizeof(_cache_time_s[0]));
+  return cached;
+}
 
 uint16_t StorageService::read_cached_field(CacheField field, float *out, uint16_t max_count) const {
   const uint16_t count = std::min(cached_count(), max_count);
@@ -118,11 +194,21 @@ uint16_t StorageService::read_cache(MeasuresAGo *out, uint16_t max_count) const 
 
 uint16_t StorageService::cached_count() const { return _cache.get_size(); }
 
-void StorageService::backup_cache() const { _cache.backup(); }
+void StorageService::backup_cache() const {
+  _cache.backup();
+  _backup_cache_times();
+}
 
-void StorageService::restore_cache() { _cache.restore(); }
+void StorageService::restore_cache() {
+  _cache.restore();
+  _restore_cache_times();
+}
 
-void StorageService::clear_cache() { _cache.clean(); }
+void StorageService::clear_cache() {
+  _cache.clean();
+  _cache_time_count = 0;
+  _backup_cache_times();
+}
 
 // ---------------------------------------------------------------------------
 // Persistent (route) operations

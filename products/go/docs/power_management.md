@@ -193,7 +193,8 @@ central connected follows the same deep-sleep cycle as Offline mode:
   BLE up in `Orchestrator::init()`. A bonded phone reconnects while the device
   is unlocked, which keeps it awake
 - **TVOC/NOx index:** the gas-index algorithm needs continuous sampling, so
-  deep-sleep cycles show raw SRAW ticks, the same as Offline mode
+  deep-sleep cycles show "-" for TVOC and NOx, the same as Offline mode.
+  Raw ticks are still recorded in the raw fields
 
 The Portable PM duty cycle can leave the SPS30 asleep when deep sleep begins.
 `prepare_for_sleep()` never holds an `Asleep` PM sensor warm or sends it a

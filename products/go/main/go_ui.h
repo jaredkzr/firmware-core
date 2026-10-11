@@ -133,6 +133,11 @@ struct BuildContext {
   // Temporary measurement cache (for chart rendering)
   const MeasuresAGo *cache;
   uint8_t cache_count;
+  /// Push time of each cache entry in retained-clock seconds, aligned with
+  /// `cache`; null when unknown (chart time labels are then omitted).
+  const uint32_t *cache_times_s = nullptr;
+  /// Retained-clock seconds now, the reference for chart sample ages.
+  uint32_t now_retained_s = TRACKING_TIME_INVALID_S;
 
   // Current timestamp for snackbar expiry
   uint32_t now_ms;
@@ -211,6 +216,9 @@ public:
 
   /// Get the current screen (for orchestrator decisions).
   Screen current_screen() const;
+
+  /// Metric selected on Home (None when no chart is shown).
+  Metric active_metric() const { return _active_metric; }
 
   /// True when the user is on any menu-navigation screen, including settings
   /// groups, choices, confirmations, and About. Used by the orchestrator to
@@ -501,7 +509,7 @@ private:
   void populate_accel_test_rows(DisplayValues &v, const BuildContext &ctx) const;
 
   // --- Chart extraction ---
-  void populate_chart(DisplayValues &v, const MeasuresAGo *cache, uint8_t cache_count) const;
+  void populate_chart(DisplayValues &v, const BuildContext &ctx) const;
 
   // --- Settings choice helpers ---
   static const SettingId *group_items(Screen screen, uint8_t &count);

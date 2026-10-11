@@ -444,12 +444,9 @@ GoApp::FastPathResult GoApp::execute_fast_path(const RtcAppState &state,
   bool has_measures = false;
   if (!promote) {
     Measures measures = sm.start_measures(1, SensorGroup::All);
-    // UX placeholder: fast path never configures the gas-index algorithm
-    // (no SensorProducer), so index fields stay at invalid sentinels.
-    // Overwrite with raw ticks so the display and stored route points
-    // still show a value during fast-path sleep cycles.
-    measures.tvoc_nox.tvoc_index = measures.tvoc_nox.tvoc_raw;
-    measures.tvoc_nox.nox_index = measures.tvoc_nox.nox_raw;
+    // The fast path never runs the gas-index algorithm (no SensorProducer),
+    // so TVOC/NOx index fields stay at invalid sentinels: Home shows "-" and
+    // route points store no index. Raw ticks remain in tvoc_raw/nox_raw.
     ago = measures_to_ago(measures);
     has_measures = true;
     AG_LOGI(TAG,

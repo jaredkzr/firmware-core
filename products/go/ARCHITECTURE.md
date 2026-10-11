@@ -382,7 +382,8 @@ from deep sleep is configured. See [Accelerometer Service](docs/accel_service.md
 TVOC and NOx index values (Sensirion SGP41 gas-index algorithm) are only
 available while the device stays awake in Portable or Stationary mode. During
 deep-sleep cycles (Offline, or Portable with Portable Sleep enabled) the
-display shows raw SRAW ticks instead of index values.
+index fields stay invalid: the display shows "-" and route points carry no
+index. Raw SRAW ticks are still recorded in the separate raw fields.
 
 **Why the algorithm cannot run across deep-sleep cycles:**
 
@@ -407,8 +408,11 @@ rejected for Offline mode because of hard constraints:
 
 The fundamental issue is that the gas-index algorithm is designed for
 always-on monitoring. Offline mode exists to save battery via deep sleep,
-and these goals are incompatible. Displaying raw SRAW ticks (or dashes)
-is more honest than showing an unreliable index.
+and these goals are incompatible. Showing dashes is more honest than an
+unreliable index. Raw SRAW ticks were previously copied into the index
+fields as a display placeholder; that mixed a ~30000-tick raw scale with the
+0–500 index scale on screen, in charts, and in exported routes, so it was
+removed.
 
 ### GPS Producer
 

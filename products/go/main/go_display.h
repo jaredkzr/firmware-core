@@ -60,6 +60,8 @@ enum class Metric : uint8_t {
   Humidity,
   Tvoc,
   Nox,
+  Pressure,
+  Altitude,
 };
 
 inline constexpr uint8_t MAX_LIST_ROWS = 10;
@@ -158,6 +160,10 @@ struct DisplayValues {
   uint8_t chart_count = 0;
   float chart_min = 0.0f;
   float chart_max = 0.0f;
+  /// Age in seconds of the oldest / newest plotted sample;
+  /// TRACKING_TIME_INVALID_S when the cache times are unknown.
+  uint32_t chart_oldest_age_s = TRACKING_TIME_INVALID_S;
+  uint32_t chart_newest_age_s = TRACKING_TIME_INVALID_S;
 
   // --- Snackbar ---
   const char *snackbar_text = nullptr;
@@ -359,7 +365,9 @@ private:
   void _draw_snackbar(const DisplayValues &v);
   void _draw_shutdown(Screen s);
   void _draw_pairing_passkey(const DisplayValues &v);
-  void _draw_chart(const DisplayValues &v);
+  void _draw_chart(const DisplayValues &v, int plot_x, int plot_y, int plot_w, int plot_h);
+  void _draw_chart_panel(const DisplayValues &v);
+  void _draw_chart_span(const DisplayValues &v);
   void _draw_info(const DisplayValues &v);
   void _draw_provisioning(const DisplayValues &v);
   void _draw_provisioning_confirm(const DisplayValues &v);

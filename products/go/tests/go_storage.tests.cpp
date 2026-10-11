@@ -49,12 +49,15 @@ class FakeRTOS : public RTOS {
 public:
   void delay_ms_impl(uint32_t /*ms*/) override {}
   uint64_t get_time_ms_impl() override { return _now_ms; }
+  uint64_t get_retained_time_ms_impl() override { return _retained_ms; }
 
   void set(uint64_t now_ms) { _now_ms = now_ms; }
   void advance(uint64_t delta_ms) { _now_ms += delta_ms; }
+  void set_retained(uint64_t retained_ms) { _retained_ms = retained_ms; }
 
 private:
   uint64_t _now_ms = 0;
+  uint64_t _retained_ms = 0;
 };
 
 static FakeRTOS s_fake_rtos;
@@ -191,6 +194,80 @@ static RoutePoint make_route_point(int seed) {
 }
 
 // ============================================================================
+// Cache times — per-entry push times for chart time labels
+// ============================================================================
+
+TEST_CASE("Cache times: aligned with entries, trimmed with the ring, and cleared",
+          "[StorageService][cache][time]") {
+  StubPayloadCacheStorage stub_storage;
+  PayloadCache cache(stub_storage, 16);
+  MockNandStorage mock_nand;
+  StorageService svc(cache, mock_nand);
+  svc.clear_cache(); // RTC-backed times are a process-wide static on host
+
+  static constexpr uint16_t BUF = 16;
+  uint32_t times[BUF] = {};
+
+  SECTION("times follow pushes in retained-clock seconds, oldest first") {
+    for (uint32_t s : {100u, 160u, 220u}) {
+      s_fake_rtos.set_retained(static_cast<uint64_t>(s) * 1000 + 999);
+      svc.cache_measurement(make_valid_entry(static_cast<int>(s)));
+    }
+    REQUIRE(svc.read_cache_times(times, BUF) == 3);
+    CHECK(times[0] == 100);
+    CHECK(times[1] == 160);
+    CHECK(times[2] == 220);
+  }
+
+  SECTION("a full ring keeps the newest times aligned with its entries") {
+    for (uint32_t i = 0; i < 20; ++i) {
+      s_fake_rtos.set_retained(static_cast<uint64_t>(i) * 60'000);
+      svc.cache_measurement(make_valid_entry(static_cast<int>(i)));
+    }
+    const uint16_t n = svc.read_cache_times(times, BUF);
+    REQUIRE(n == svc.cached_count());
+    REQUIRE(n == 15); // a 16-slot ring holds 15 entries
+    CHECK(times[0] == 5 * 60);
+    CHECK(times[n - 1] == 19 * 60);
+  }
+
+  SECTION("clear_cache drops the times") {
+    svc.cache_measurement(make_valid_entry(1));
+    svc.clear_cache();
+    CHECK(svc.read_cache_times(times, BUF) == 0);
+  }
+
+  SECTION("entries without times hide labels until the ring refills") {
+    // Entries cached without a time (e.g. RTC times lost while the cache
+    // survived) leave the times short of the entries.
+    cache.push(make_valid_entry(1));
+    cache.push(make_valid_entry(2));
+    CHECK(svc.read_cache_times(times, BUF) == 0);
+
+    for (int i = 0; i < 13; ++i) {
+      svc.cache_measurement(make_valid_entry(i));
+    }
+    CHECK(svc.read_cache_times(times, BUF) == 0); // 13 times for 15 entries
+
+    svc.cache_measurement(make_valid_entry(14));
+    svc.cache_measurement(make_valid_entry(15));
+    CHECK(svc.read_cache_times(times, BUF) == 15); // timeless entries rotated out
+  }
+
+  SECTION("restore with no cached entries drops the times") {
+    for (int i = 0; i < 3; ++i) {
+      svc.cache_measurement(make_valid_entry(i));
+    }
+    // A fresh service whose cache restore finds nothing drops the times too.
+    StubPayloadCacheStorage empty_storage;
+    PayloadCache empty_cache(empty_storage, 16);
+    StorageService restored(empty_cache, mock_nand);
+    restored.restore_cache();
+    CHECK(restored.cached_count() == 0);
+    CHECK(restored.read_cache_times(times, BUF) == 0);
+  }
+}
+
 // TEST CASE 1 — Cache: read_cached_field field extraction
 // ============================================================================
 

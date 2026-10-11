@@ -291,9 +291,8 @@ then calls `start_measures(1, TvocNox)` and caches the result in
 In Offline mode, no `SensorProducer` is created. The fast path calls
 `start_measures(1, All)` directly on `SensorManager`. The algorithm is
 never configured (`_index_configured == false`), so index fields stay at
-invalid sentinels. A retained UX placeholder in `execute_fast_path()`
-(`go_app.cpp`) overwrites the index fields with raw ticks so the display
-still shows a value.
+invalid sentinels and the display shows "-". Raw ticks are kept in
+`tvoc_raw` / `nox_raw` for routes and diagnostics.
 
 ### Orchestrator Signalling
 

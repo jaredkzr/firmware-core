@@ -1187,6 +1187,30 @@ TEST_CASE("execute_fast_path: cold sensors full warmup, measure, sleep") {
   CHECK(test_spy::warmup_step_count > 0);
 }
 
+TEST_CASE("execute_fast_path: TVOC/NOx index stays invalid; raw ticks are kept") {
+  test_spy::reset();
+  test_spy::sleep_decision_to_return = {PowerService::SleepType::Deep, 60000};
+  // The fast path never runs the gas-index algorithm, so the driver reports
+  // raw ticks with invalid index sentinels.
+  test_spy::measures_to_return.tvoc_nox.tvoc_raw = 29806;
+  test_spy::measures_to_return.tvoc_nox.nox_raw = 16519;
+
+  MockBoard board;
+  GoApp app(board);
+  GoAppTestAccess access(app);
+
+  RtcAppState state{};
+  volatile bool button = false;
+
+  auto result = access.execute_fast_path(state, button);
+
+  REQUIRE(result.has_measures);
+  CHECK(result.measures.tvoc_nox.tvoc_index == MeasuresInvalid::TVOC);
+  CHECK(result.measures.tvoc_nox.nox_index == MeasuresInvalid::NOX);
+  CHECK(result.measures.tvoc_nox.tvoc_raw == 29806);
+  CHECK(result.measures.tvoc_nox.nox_raw == 16519);
+}
+
 TEST_CASE("execute_fast_path: decides sleep for the persisted mode with no BLE link") {
   test_spy::reset();
   test_spy::sleep_decision_to_return = {PowerService::SleepType::Deep, 60000};

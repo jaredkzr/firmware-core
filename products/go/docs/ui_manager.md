@@ -296,7 +296,7 @@ factory-state write and reboot path.
 
 | Screen | Style | Wrapping | Scroll |
 |---|---|---|---|
-| Home (metrics) | Circular cycle (5 entries: None, Pm25, Co2, Temp, Humidity) | Yes | N/A |
+| Home (metrics) | Circular cycle (9 entries: None, Pm25, Co2, Temp, Humidity, Tvoc, Nox, Pressure, Altitude) | Yes | N/A |
 | MainMenu | Circular (4 rows, all always enabled) | Yes | N/A |
 | TrackingMenu | Circular (5 rows) | Yes | None |
 | TrackingStatus | Circular (3 selectable rows, 6 informational rows) | Yes | None; Session/GPS view switch |
@@ -472,5 +472,21 @@ clear.
 
 `build_values()` extracts per-metric float values from the `MeasuresAGo` cache
 array (passed via `BuildContext`). Invalid sentinel values are skipped.
-Integer fields (CO2, TVOC, NOx) are cast to float. The chart buffer is
-sized to `UI_CHART_BUF_SIZE` (16, matching `PAYLOAD_CACHE_MAX_SIZE`).
+Integer fields (CO2, TVOC, NOx) are cast to float. Pressure and Altitude come
+from the cached `PressureData` and use its `is_pressure_valid()` /
+`is_altitude_valid()` checks; altitude stays in meters and is converted only
+when Min/Max are formatted. The chart buffer is sized to `UI_CHART_BUF_SIZE`
+(16, matching `PAYLOAD_CACHE_MAX_SIZE`).
+
+When `BuildContext::cache_times_s` is set, `populate_chart()` also reports
+`chart_oldest_age_s` / `chart_newest_age_s`: the ages, relative to
+`now_retained_s`, of the first and last _plotted_ samples. Skipped samples
+therefore never stretch the labelled span. Ages stay `TRACKING_TIME_INVALID_S`
+when times are unknown or run ahead of the clock. The orchestrator reads the
+retained clock once per context, and only when a chart or Tracking Status
+needs it.
+
+TVOC and NOx charts plot only gas-index values (0 to `GAS_INDEX_MAX`, 500).
+Deep-sleep fast-path wakes leave the index fields invalid, so those samples are
+skipped. The upper bound also rejects raw SRAW ticks cached by older firmware,
+which copied them into the index fields.
