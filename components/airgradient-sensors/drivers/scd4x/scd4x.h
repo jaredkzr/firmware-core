@@ -105,6 +105,18 @@ public:
   bool supports_abc_period_configuration() const override;
   bool set_abc_period_days(int days) override;
 
+  /**
+   * @brief Stop periodic measurement before a cold ESP deep sleep.
+   *
+   * Sends stop_periodic_measurement and clears the measuring state. The
+   * sensor stays idle and powered. Call only before a cold sleep: the next
+   * wake must use init(false), whose clean wake_up -> stop -> reinit -> start
+   * sequence restarts periodic measurement. Reads fail until then.
+   *
+   * @return true when the sensor was not measuring or accepted the command.
+   */
+  bool stop_measurement() override;
+
 private:
   i2c_master_bus_handle_t _i2c_bus;
   uint8_t _address;

@@ -145,6 +145,7 @@ TEST_CASE("load from empty store returns struct defaults", "[settings]") {
   REQUIRE(s.use_feet == false);
   REQUIRE(s.pm_use_usaqi == false);
   REQUIRE(s.auto_lock_seconds == 10);
+  REQUIRE(s.portable_sleep_enabled == false);
   REQUIRE(s.disable_cloud == false);
   REQUIRE(s.configuration_control == ConfigurationControl::Both);
   REQUIRE(s.co2_abc_days == CO2_ABC_DAYS_DEFAULT);
@@ -210,6 +211,7 @@ TEST_CASE("save then load round-trips all fields", "[settings]") {
   original.use_feet = true;
   original.pm_use_usaqi = true;
   original.auto_lock_seconds = 30;
+  original.portable_sleep_enabled = true;
   original.configuration_control = ConfigurationControl::Local;
   original.co2_abc_days = 200;
   original.tvoc_learning_offset = 24;
@@ -227,6 +229,7 @@ TEST_CASE("save then load round-trips all fields", "[settings]") {
   REQUIRE(loaded.use_feet == original.use_feet);
   REQUIRE(loaded.pm_use_usaqi == original.pm_use_usaqi);
   REQUIRE(loaded.auto_lock_seconds == original.auto_lock_seconds);
+  REQUIRE(loaded.portable_sleep_enabled == original.portable_sleep_enabled);
   REQUIRE(loaded.configuration_control == original.configuration_control);
   REQUIRE(loaded.co2_abc_days == original.co2_abc_days);
   REQUIRE(loaded.tvoc_learning_offset == original.tvoc_learning_offset);
@@ -257,7 +260,6 @@ TEST_CASE("shared Go config fields and update model", "[settings][config]") {
   REQUIRE(static_cast<uint32_t>(GoConfigField::MeasurementInterval) == (1U << 10));
   REQUIRE(static_cast<uint32_t>(GoConfigField::AltitudeUnit) == (1U << 11));
   REQUIRE(static_cast<uint32_t>(GoConfigField::GpsMode) == (1U << 12));
-  REQUIRE(static_cast<uint32_t>(GoConfigField::FrontLedBrightness) == (1U << 13));
   REQUIRE(static_cast<uint32_t>(GoConfigField::BackLedBrightness) == (1U << 14));
   REQUIRE(static_cast<uint32_t>(GoConfigField::TouchLedIntensity) == (1U << 15));
   REQUIRE(static_cast<uint32_t>(GoConfigField::BuzzerEnabled) == (1U << 16));

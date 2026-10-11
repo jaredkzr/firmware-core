@@ -1,9 +1,8 @@
 /**
  * AirGradient Go -- LED service implementation
  *
- * Adaptive render loop, back-LED effect engine, touch flash manager,
- * and front direct writes.  See products/go/specs/led_service.md for
- * the full design.
+ * Adaptive render loop, back-LED effect engine, and touch flash manager.
+ * See products/go/docs/led_service.md for the full design.
  *
  * AirGradient
  * https://airgradient.com
@@ -25,16 +24,6 @@ static constexpr const char *TAG = "Led";
 // Named constants -- no magic numbers
 // ===========================================================================
 
-// --- Front LED channels (single-channel PWM) ---
-static constexpr uint8_t FRONT_CH_LED25 = 30;
-static constexpr uint8_t FRONT_CH_LED26 = 31;
-
-// --- Front PWM levels ---
-static constexpr uint8_t FRONT_PWM_OFF = 0;
-static constexpr uint8_t FRONT_PWM_DIM = 5;
-static constexpr uint8_t FRONT_PWM_MID = 13;
-static constexpr uint8_t FRONT_PWM_BRIGHT = 26;
-
 // --- Back LED groups (blue-channel base per RGB group) ---
 static constexpr uint8_t NUM_BACK_LEDS = 5;
 static constexpr uint8_t BACK_B_CHANNELS[NUM_BACK_LEDS] = {6, 12, 15, 18, 24};
@@ -49,6 +38,13 @@ static constexpr uint8_t BACK_SCALE_BRIGHT = 255;
 static constexpr uint8_t TOUCH_CH_SELECT = 27; // LED10: OUT27/28/29
 static constexpr uint8_t TOUCH_CH_LEFT = 3;    // LED2: OUT3/4/5
 static constexpr uint8_t TOUCH_CH_RIGHT = 0;   // LED1: OUT0/1/2
+static constexpr uint8_t NUM_TOUCH_LEDS = 3;
+static constexpr uint8_t TOUCH_B_CHANNELS[NUM_TOUCH_LEDS] = {TOUCH_CH_SELECT, TOUCH_CH_LEFT,
+                                                            TOUCH_CH_RIGHT};
+
+// --- Shutdown handshake ---
+static constexpr uint8_t SHUTDOWN_ACK_QUEUE_DEPTH = 1;
+static constexpr uint8_t SHUTDOWN_ACK = 1;
 
 // --- Touch PWM levels ---
 static constexpr uint8_t TOUCH_PWM_OFF = 0;
@@ -78,20 +74,6 @@ static constexpr float TWO_PI = 6.2831853f;
 // ===========================================================================
 
 static bool rgb_eq(Rgb a, Rgb b) { return a.r == b.r && a.g == b.g && a.b == b.b; }
-
-static uint8_t front_pwm_for(LedBrightness b) {
-  switch (b) {
-  case LedBrightness::Off:
-    return FRONT_PWM_OFF;
-  case LedBrightness::Dim:
-    return FRONT_PWM_DIM;
-  case LedBrightness::Mid:
-    return FRONT_PWM_MID;
-  case LedBrightness::Bright:
-    return FRONT_PWM_BRIGHT;
-  }
-  return FRONT_PWM_OFF;
-}
 
 static uint8_t back_scale_for(LedBrightness b) {
   switch (b) {
@@ -180,6 +162,9 @@ LedService::~LedService() {
   if (_queue != nullptr) {
     RTOS::queue_delete(_queue);
   }
+  if (_ack_queue != nullptr) {
+    RTOS::queue_delete(_ack_queue);
+  }
 }
 
 // ===========================================================================
@@ -204,7 +189,8 @@ bool LedService::init() {
   }
 
   _queue = RTOS::queue_create(_config.queue_depth, sizeof(Cmd));
-  if (_queue == nullptr) {
+  _ack_queue = RTOS::queue_create(SHUTDOWN_ACK_QUEUE_DEPTH, sizeof(SHUTDOWN_ACK));
+  if (_queue == nullptr || _ack_queue == nullptr) {
     AG_LOGE(TAG, "queue_create failed");
     _init_ok = false;
     return false;
@@ -234,15 +220,33 @@ bool LedService::start() {
   return true;
 }
 
-// ===========================================================================
-// Public API -- Front
-// ===========================================================================
+void LedService::shutdown() {
+  if (_is_inert() || !_init_called || _shutdown_requested.exchange(true)) {
+    return;
+  }
+  // _shutdown_requested now makes _enqueue() drop every new command.
 
-void LedService::front_set_brightness(LedBrightness brightness) {
+  if (_task == nullptr) {
+    // No worker owns the driver (start() not called or task creation
+    // failed), so the caller can drive it directly.
+    _apply_shutdown();
+    return;
+  }
+
+  // Hand the work to the worker so driver access stays on one task. Commands
+  // already queued run first; the worker parks right after Shutdown.
   Cmd cmd{};
-  cmd.kind = Cmd::Kind::FrontSetBrightness;
-  cmd.brightness = brightness;
-  _enqueue(cmd);
+  cmd.kind = Cmd::Kind::Shutdown;
+  if (!RTOS::queue_send(_queue, &cmd, _config.shutdown_timeout_ms)) {
+    AG_LOGW(TAG, "shutdown: command queue full after %lu ms; LEDs unchanged",
+            static_cast<unsigned long>(_config.shutdown_timeout_ms));
+    return;
+  }
+  uint8_t ack = 0;
+  if (!RTOS::queue_receive(_ack_queue, &ack, _config.shutdown_timeout_ms)) {
+    AG_LOGW(TAG, "shutdown: worker did not confirm within %lu ms",
+            static_cast<unsigned long>(_config.shutdown_timeout_ms));
+  }
 }
 
 // ===========================================================================
@@ -378,7 +382,7 @@ bool LedService::_is_inert() const { return _config.driver == nullptr; }
 // ===========================================================================
 
 void LedService::_enqueue(const Cmd &cmd) {
-  if (_is_inert() || !_init_ok || !_started) {
+  if (_is_inert() || !_init_ok || !_started || _shutdown_requested.load()) {
     return;
   }
   RTOS::queue_send(_queue, &cmd, 0);
@@ -390,11 +394,6 @@ void LedService::_enqueue(const Cmd &cmd) {
 
 void LedService::_process_cmd(const Cmd &cmd, uint32_t now_ms) {
   switch (cmd.kind) {
-
-  case Cmd::Kind::FrontSetBrightness:
-    _front_brightness = cmd.brightness;
-    _front_dirty = true;
-    break;
 
   case Cmd::Kind::BackSolid:
     _clear_saved_effect();
@@ -546,6 +545,42 @@ void LedService::_process_cmd(const Cmd &cmd, uint32_t now_ms) {
     }
     break;
   }
+
+  case Cmd::Kind::Shutdown:
+    _apply_shutdown();
+    break;
+  }
+}
+
+void LedService::_apply_shutdown() {
+  // Cancel every effect so nothing is left to tick or restore.
+  _clear_saved_effect();
+  _back_effect = BackEffectState{};
+  _last_rendered_back = {0, 0, 0};
+  _uniform_back_output.reset();
+  _touch_active = false;
+  _touch_steady = false;
+  _touch_started_at_ms = 0;
+  _back_dirty = false;
+  _touch_dirty = false;
+
+  // Write every output dark before standby so the next init() starts from a
+  // known state even if standby fails. init() also zeroes all channels.
+  bool outputs_ok = true;
+  for (uint8_t i = 0; i < NUM_BACK_LEDS; ++i) {
+    outputs_ok = _config.driver->set_rgb(BACK_B_CHANNELS[i], 0, 0, 0) && outputs_ok;
+  }
+  for (uint8_t i = 0; i < NUM_TOUCH_LEDS; ++i) {
+    outputs_ok = _config.driver->set_rgb(TOUCH_B_CHANNELS[i], 0, 0, 0) && outputs_ok;
+  }
+  const bool standby_ok = _config.driver->standby();
+  _shut_down = true;
+
+  if (outputs_ok && standby_ok) {
+    AG_LOGI(TAG, "shutdown: LEDs off, driver in standby");
+  } else {
+    AG_LOGW(TAG, "shutdown: outputs %s, standby %s", outputs_ok ? "off" : "write failed",
+            standby_ok ? "ok" : "failed");
   }
 }
 
@@ -854,25 +889,6 @@ uint32_t LedService::_next_wait_timeout_ms(uint32_t now_ms) const {
 // Internal -- Render
 // ===========================================================================
 
-void LedService::_render_front() {
-  if (!_front_dirty) {
-    return;
-  }
-  _front_dirty = false;
-
-  uint8_t pwm = front_pwm_for(_front_brightness);
-  bool ok = _config.driver->set_channel(FRONT_CH_LED25, pwm);
-  ok = _config.driver->set_channel(FRONT_CH_LED26, pwm) && ok;
-
-  if (!ok && !_driver_error_logged) {
-    AG_LOGW(TAG, "front write failed");
-    _driver_error_logged = true;
-  } else if (ok && _driver_error_logged) {
-    AG_LOGI(TAG, "driver recovered");
-    _driver_error_logged = false;
-  }
-}
-
 void LedService::_render_back() {
   if (!_back_dirty) {
     return;
@@ -936,18 +952,19 @@ void LedService::_render_touch() {
   _touch_dirty = false;
 
   // Write all three touch pads: active pad gets PWM, others get off.
-  static constexpr uint8_t ALL_TOUCH_CHANNELS[] = {TOUCH_CH_SELECT, TOUCH_CH_LEFT, TOUCH_CH_RIGHT};
-  static constexpr TouchPad ALL_TOUCH_PADS[] = {TouchPad::Select, TouchPad::Left, TouchPad::Right};
+  // Same order as TOUCH_B_CHANNELS.
+  static constexpr TouchPad ALL_TOUCH_PADS[NUM_TOUCH_LEDS] = {TouchPad::Select, TouchPad::Left,
+                                                             TouchPad::Right};
 
   bool ok = true;
-  for (uint8_t i = 0; i < 3; ++i) {
+  for (uint8_t i = 0; i < NUM_TOUCH_LEDS; ++i) {
     // Lit when the steady test mode is on, or this is the active flash pad.
     const bool lit = _touch_steady || (_touch_active && ALL_TOUCH_PADS[i] == _touch_active_pad);
     if (lit) {
       uint8_t pwm = touch_pwm_for(_touch_intensity);
-      ok = _config.driver->set_rgb(ALL_TOUCH_CHANNELS[i], pwm, pwm, pwm) && ok;
+      ok = _config.driver->set_rgb(TOUCH_B_CHANNELS[i], pwm, pwm, pwm) && ok;
     } else {
-      ok = _config.driver->set_rgb(ALL_TOUCH_CHANNELS[i], 0, 0, 0) && ok;
+      ok = _config.driver->set_rgb(TOUCH_B_CHANNELS[i], 0, 0, 0) && ok;
     }
   }
 
@@ -978,13 +995,26 @@ void LedService::_run() {
 
     if (got_cmd) {
       _process_cmd(cmd, _now_ms);
+      if (_shut_down) {
+        RTOS::queue_send(_ack_queue, &SHUTDOWN_ACK, 0);
+        _park();
+      }
     }
 
     _tick_back(_now_ms);
     _tick_touch(_now_ms);
-    _render_front();
     _render_back();
     _render_touch();
+  }
+}
+
+void LedService::_park() {
+  // After shutdown the worker must never write to the driver again. Block on
+  // the (now ignored) command queue instead of self-deleting so the
+  // destructor's task_delete(_task) stays valid.
+  while (true) {
+    Cmd ignored{};
+    (void)RTOS::queue_receive(_queue, &ignored, UINT32_MAX);
   }
 }
 
@@ -995,21 +1025,24 @@ void LedService::_run() {
 #ifdef TEST_HOST
 
 void LedService::pump_for_test(uint32_t now_ms) {
-  if (_is_inert() || !_init_ok) {
+  if (_is_inert() || !_init_ok || _shut_down) {
     return;
   }
 
   _now_ms = now_ms;
 
-  // Drain all queued commands
+  // Drain all queued commands; mirror _run(): stop at Shutdown and ack it.
   Cmd cmd{};
   while (RTOS::queue_receive(_queue, &cmd, 0)) {
     _process_cmd(cmd, now_ms);
+    if (_shut_down) {
+      RTOS::queue_send(_ack_queue, &SHUTDOWN_ACK, 0);
+      return;
+    }
   }
 
   _tick_back(now_ms);
   _tick_touch(now_ms);
-  _render_front();
   _render_back();
   _render_touch();
 }

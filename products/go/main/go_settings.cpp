@@ -21,10 +21,10 @@ constexpr const char *KEY_CO2_ABC_DAYS = "cad";
 constexpr const char *KEY_TVOC_LEARNING_OFFSET = "tlo";
 constexpr const char *KEY_NOX_LEARNING_OFFSET = "nlo";
 // LED brightness — stored as int, validated against enum range.
-constexpr const char *KEY_FRONT_LED_BRIGHTNESS = "lb";
 constexpr const char *KEY_BACK_LED_BRIGHTNESS = "blb";
 constexpr const char *KEY_TOUCH_LED_INTENSITY = "tlb";
 constexpr const char *KEY_BUZZER_ENABLED = "bv";
+constexpr const char *KEY_PORTABLE_SLEEP_ENABLED = "psl";
 // Static IP — 5 uint32s persisted as ints. ip == 0 means DHCP.
 constexpr const char *KEY_STATIC_IP = "sip";
 constexpr const char *KEY_STATIC_NETMASK = "snm";
@@ -247,11 +247,6 @@ GoSettings load_go_settings(ConfigStore &store) {
 
   // LED brightness — missing key or invalid value loads as Off (struct default).
   int led_val = 0;
-  if (store.get_int(KEY_FRONT_LED_BRIGHTNESS, led_val) == ConfigStoreResult::OK &&
-      is_led_brightness_valid(led_val)) {
-    settings.front_led_brightness = static_cast<LedBrightness>(led_val);
-  }
-  led_val = 0;
   if (store.get_int(KEY_BACK_LED_BRIGHTNESS, led_val) == ConfigStoreResult::OK &&
       is_led_brightness_valid(led_val)) {
     settings.back_led_brightness = static_cast<LedBrightness>(led_val);
@@ -265,6 +260,12 @@ GoSettings load_go_settings(ConfigStore &store) {
   bool buzzer_enabled = false;
   if (store.get_bool(KEY_BUZZER_ENABLED, buzzer_enabled) == ConfigStoreResult::OK) {
     settings.buzzer_enabled = buzzer_enabled;
+  }
+
+  bool portable_sleep_enabled = false;
+  if (store.get_bool(KEY_PORTABLE_SLEEP_ENABLED, portable_sleep_enabled) ==
+      ConfigStoreResult::OK) {
+    settings.portable_sleep_enabled = portable_sleep_enabled;
   }
 
   // Static IP fields load together; ip == 0 retains the DHCP default.
@@ -298,7 +299,7 @@ bool GoSettings::equals(const GoSettings &other) const {
          use_fahrenheit == other.use_fahrenheit && use_feet == other.use_feet &&
          pm_use_usaqi == other.pm_use_usaqi && gps_mode == other.gps_mode &&
          operating_mode == other.operating_mode && auto_lock_seconds == other.auto_lock_seconds &&
-         front_led_brightness == other.front_led_brightness &&
+         portable_sleep_enabled == other.portable_sleep_enabled &&
          back_led_brightness == other.back_led_brightness &&
          touch_led_intensity == other.touch_led_intensity &&
          buzzer_enabled == other.buzzer_enabled && disable_cloud == other.disable_cloud &&
@@ -348,8 +349,7 @@ bool is_go_settings_valid(const GoSettings &settings) {
     return false;
   }
 
-  if (!is_led_brightness_valid(static_cast<int>(settings.front_led_brightness)) ||
-      !is_led_brightness_valid(static_cast<int>(settings.back_led_brightness)) ||
+  if (!is_led_brightness_valid(static_cast<int>(settings.back_led_brightness)) ||
       !is_touch_led_intensity_valid(static_cast<int>(settings.touch_led_intensity))) {
     return false;
   }
@@ -415,10 +415,6 @@ bool save_go_settings(ConfigStore &store, const GoSettings &settings) {
     return false;
   }
 
-  if (store.set_int(KEY_FRONT_LED_BRIGHTNESS, static_cast<int>(settings.front_led_brightness)) !=
-      ConfigStoreResult::OK) {
-    return false;
-  }
   if (store.set_int(KEY_BACK_LED_BRIGHTNESS, static_cast<int>(settings.back_led_brightness)) !=
       ConfigStoreResult::OK) {
     return false;
@@ -428,6 +424,10 @@ bool save_go_settings(ConfigStore &store, const GoSettings &settings) {
     return false;
   }
   if (store.set_bool(KEY_BUZZER_ENABLED, settings.buzzer_enabled) != ConfigStoreResult::OK) {
+    return false;
+  }
+  if (store.set_bool(KEY_PORTABLE_SLEEP_ENABLED, settings.portable_sleep_enabled) !=
+      ConfigStoreResult::OK) {
     return false;
   }
 
@@ -546,15 +546,15 @@ bool clear_factory_settings(ConfigStore &store) {
 void print_settings(const GoSettings &settings) {
   AG_LOGI(TAG,
           "** settings | meas_int=%d | gps_mode=%d "
-          "op_mode=%d | auto_lock=%d | fahrenheit=%s feet=%s usaqi=%s | "
-          "led: front=%d back=%d touch=%d | buzzer=%s | "
+          "op_mode=%d | auto_lock=%d | portable_sleep=%s | fahrenheit=%s feet=%s usaqi=%s | "
+          "led: back=%d touch=%d | buzzer=%s | "
           "disable_cloud=%s config_control=%d co2_abc_days=%d "
           "tvoc_learning_offset=%d nox_learning_offset=%d static_ip=%s "
           "onboarding_done=%s **",
           settings.measure_interval_seconds, settings.gps_mode, settings.operating_mode,
-          settings.auto_lock_seconds, settings.use_fahrenheit ? "true" : "false",
+          settings.auto_lock_seconds, settings.portable_sleep_enabled ? "on" : "off",
+          settings.use_fahrenheit ? "true" : "false",
           settings.use_feet ? "true" : "false", settings.pm_use_usaqi ? "true" : "false",
-          static_cast<int>(settings.front_led_brightness),
           static_cast<int>(settings.back_led_brightness),
           static_cast<int>(settings.touch_led_intensity), settings.buzzer_enabled ? "on" : "off",
           settings.disable_cloud ? "true" : "false",

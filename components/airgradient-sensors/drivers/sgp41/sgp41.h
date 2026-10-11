@@ -60,6 +60,18 @@ public:
    */
   void set_compensation(float temperature_c, float humidity_pct) override;
 
+  /**
+   * @brief Turn the hotplate off and return the sensor to idle
+   *
+   * Sends sgp41_turn_heater_off (0x3615) and waits HEATER_OFF_DELAY_MS. The
+   * next run_conditioning() or read() command switches the heater back on,
+   * so a cold wake re-conditions through the normal warmup.
+   *
+   * @return true if the command was acknowledged (or the driver is not
+   *         initialized and there is nothing to switch off)
+   */
+  bool heater_off() override;
+
 private:
   // I2C handles (objects)
   i2c_master_bus_handle_t _i2c_bus;

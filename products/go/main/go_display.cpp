@@ -8,6 +8,7 @@
 #include <cstring>
 
 #include "go_text_wrap.h"
+#include "go_type_helpers.hpp"
 
 #include <driver/gpio.h>
 #include <esp_attr.h>
@@ -35,24 +36,22 @@ static constexpr const char *TAG = "go_display";
 RTC_DATA_ATTR static RtcDisplaySnapshot s_rtc_display_snapshot;
 RTC_DATA_ATTR static bool s_rtc_display_snapshot_valid = false;
 
+// What the panel physically shows, recorded after every successful refresh.
+// E-paper keeps its image through deep sleep, so on wake DisplayService can
+// verify a candidate "painted" frame against frame_hash and refresh with a
+// Partial instead of a Full. The counters carry the ghosting-cleanup cadence
+// across fast-path wakes. Zero-initialized (invalid) on first power-on.
+struct RtcPanelRecord {
+  uint32_t frame_hash;
+  uint8_t partial_count;
+  uint8_t fast_count;
+  bool valid;
+};
+
+RTC_DATA_ATTR static RtcPanelRecord s_rtc_panel_record;
+
 void save_rtc_display_snapshot(const DisplayValues &values) {
-  s_rtc_display_snapshot.co2_ppm = values.co2_ppm;
-  s_rtc_display_snapshot.pm25_ugm3 = values.pm25_ugm3;
-  s_rtc_display_snapshot.temperature_c = values.temperature_c;
-  s_rtc_display_snapshot.humidity_pct = values.humidity_pct;
-  s_rtc_display_snapshot.tvoc_index = values.tvoc_index;
-  s_rtc_display_snapshot.nox_index = values.nox_index;
-  s_rtc_display_snapshot.pressure_hpa = values.pressure_hpa;
-  s_rtc_display_snapshot.altitude_m = values.altitude_m;
-  s_rtc_display_snapshot.battery_pct = values.battery_pct;
-  s_rtc_display_snapshot.is_battery_charging = values.is_battery_charging;
-  s_rtc_display_snapshot.gps_enabled = values.gps_enabled;
-  s_rtc_display_snapshot.gps_fix = values.gps_fix;
-  s_rtc_display_snapshot.tracking_active = values.tracking_active;
-  s_rtc_display_snapshot.ble_enabled = values.ble_enabled;
-  s_rtc_display_snapshot.use_fahrenheit = values.use_fahrenheit;
-  s_rtc_display_snapshot.use_feet = values.use_feet;
-  s_rtc_display_snapshot.pm_use_usaqi = values.pm_use_usaqi;
+  s_rtc_display_snapshot = snapshot_from_display_values(values);
   s_rtc_display_snapshot_valid = true;
 }
 
@@ -121,6 +120,12 @@ void delay_ms(uint32_t ms) {
 // Poll cadence must be >= 1 tick; a sub-tick delay degrades to vTaskDelay(0)
 // (bare yield), starving the lower-priority LED/buzzer tasks during refresh.
 static constexpr uint32_t BUSY_POLL_MS = 10;
+
+// Border waveform control (0x3C) values. The border is the ink ring outside
+// the active area; it must be set on every path that SW-resets the controller,
+// or it is left at the POR default (0xC0, HiZ) and drifts with stray fields.
+constexpr uint8_t BORDER_WAVEFORM_FULL = 0x05;    // follow LUT1 (ends white)
+constexpr uint8_t BORDER_WAVEFORM_PARTIAL = 0x80; // hold at VCOM (no drive)
 
 // BUSY=1 means controller processing; BUSY=0 means ready.
 void wait_busy_low() {
@@ -293,7 +298,7 @@ esp_err_t driver_hw_init_full() {
 
   // Border waveform (full mode)
   DISP_RETURN_ON_ERR(write_cmd(0x3C));
-  DISP_RETURN_ON_ERR(write_data(0x05));
+  DISP_RETURN_ON_ERR(write_data(BORDER_WAVEFORM_FULL));
 
   // Display update control
   DISP_RETURN_ON_ERR(write_cmd(0x21));
@@ -315,6 +320,15 @@ esp_err_t driver_hw_init_full() {
   wait_busy_low();
 
   return ESP_OK;
+}
+
+// Write a frame into the previous-image RAM plane (0x26) only, without a
+// refresh. Partial updates diff 0x24 against 0x26, so this restores the
+// basemap after deep sleep. Call right after driver_hw_init_full(), which
+// leaves the RAM window and cursor covering the full frame.
+esp_err_t driver_write_previous_plane(const uint8_t *data) {
+  DISP_RETURN_ON_ERR(write_cmd(0x26));
+  return write_data_bytes(data, FRAME_BYTES);
 }
 
 // Write frame to both SSD1680 RAM planes + trigger full update.
@@ -349,7 +363,7 @@ esp_err_t driver_part_begin() {
 
   // Border waveform (partial mode — differs from full init)
   DISP_RETURN_ON_ERR(write_cmd(0x3C));
-  DISP_RETURN_ON_ERR(write_data(0x80));
+  DISP_RETURN_ON_ERR(write_data(BORDER_WAVEFORM_PARTIAL));
 
   // Data entry mode (same as full init)
   DISP_RETURN_ON_ERR(write_cmd(0x11));
@@ -404,11 +418,13 @@ esp_err_t driver_part_commit() {
 }
 
 // ---------------------------------------------------------------------------
-// Fast refresh (0xC7 waveform) — full-screen, no flash
+// Fast refresh (0xC7 waveform) — full-screen, single inversion
 // ---------------------------------------------------------------------------
 // Uses a temperature-override trick: force the SSD1680 to load the OTP LUT
 // for 100 °C, which selects a shorter, more aggressive waveform. The 0xC7
-// trigger then drives all pixels unconditionally (non-differential).
+// trigger then drives all pixels unconditionally (display mode 1, the same
+// GC waveform family as Full), so the panel still visibly inverts. Use Partial
+// when the goal is to avoid a flash.
 
 // Initialize controller for fast refresh mode.
 // Must be called before driver_fast_write() + driver_fast_commit().
@@ -418,6 +434,7 @@ esp_err_t driver_hw_init_fast() {
   delay_ms(10);
   set_rst(1);
   delay_ms(10);
+  wait_busy_low();
 
   // Software reset (clears all registers to defaults)
   DISP_RETURN_ON_ERR(write_cmd(0x12));
@@ -468,6 +485,10 @@ esp_err_t driver_hw_init_fast() {
   DISP_RETURN_ON_ERR(write_data(static_cast<uint8_t>((HEIGHT_PX - 1) / 256)));
   DISP_RETURN_ON_ERR(write_data(0x00));
   DISP_RETURN_ON_ERR(write_data(0x00));
+
+  // Border waveform: SW reset left it HiZ; match the full init.
+  DISP_RETURN_ON_ERR(write_cmd(0x3C));
+  DISP_RETURN_ON_ERR(write_data(BORDER_WAVEFORM_FULL));
 
   // RAM-X counter to 0
   DISP_RETURN_ON_ERR(write_cmd(0x4E));
@@ -540,12 +561,8 @@ constexpr int ELLIPSE_CY = 8;
 constexpr int LINK_CY = 5;
 
 // Home screen: hero blocks
-constexpr int PM_BLOCK_Y = 18;
-constexpr int PM_BLOCK_H = 72;
 constexpr int PM_LABEL_BASELINE_Y = 44;
 constexpr int PM_VALUE_BASELINE_Y = 84;
-constexpr int CO2_BLOCK_Y = 90;
-constexpr int CO2_BLOCK_H = 72;
 constexpr int CO2_LABEL_NAME_BASELINE_Y = 112;
 constexpr int CO2_LABEL_UNIT_BASELINE_Y = 113;
 constexpr int CO2_VALUE_BASELINE_Y = 153;
@@ -581,11 +598,27 @@ constexpr int PAIRING_DIVIDER_Y = 86;
 constexpr int PAIRING_PASSKEY_BASELINE_Y = 145;
 constexpr int PAIRING_HINT_BASELINE_Y = 180;
 
-// Chart — shifted 1px down for 2px-thick 3rd grid divider when active
+// Chart plot width, shared by every chart.
 constexpr int PLOT_X = 4;
-constexpr int PLOT_Y = 225;
 constexpr int PLOT_W = 121; // x=4..124 → 121 pixels
-constexpr int PLOT_H = 25;  // y=225..248 → 25 pixels
+
+// Chart panel — any selected metric replaces all three grid rows
+// (y=164..249): inverted title band, Min/Max line, then a tall plot.
+constexpr int CHART_PANEL_TITLE_Y = 164;
+constexpr int CHART_PANEL_TITLE_H = 17; // y=164..180
+constexpr int CHART_PANEL_TITLE_BASELINE_Y = 177;
+constexpr int CHART_PANEL_LEFT_X = 7;   // matches the left grid column inset
+constexpr int CHART_PANEL_RIGHT_X = 68; // matches the right grid column inset
+constexpr int CHART_PANEL_VALUE_RIGHT_X = SCREEN_W - 7;
+constexpr int CHART_PANEL_STATS_BASELINE_Y = 194;
+constexpr int CHART_PANEL_PLOT_Y = 199;
+constexpr int CHART_PANEL_PLOT_H = 40;             // y=199..238
+constexpr int CHART_PANEL_TIME_BASELINE_Y = 248;   // "-15m ... now" under the plot
+constexpr int CHART_RIGHT_X = PLOT_X + PLOT_W - 1; // right edge of every plot
+// Newest sample younger than this is labelled "now" (one-minute resolution).
+constexpr uint32_t CHART_NOW_THRESHOLD_S = 60;
+constexpr int CHART_PANEL_EMPTY_BASELINE_Y = 228;
+constexpr int CHART_PANEL_LABEL_GAP = 3;
 
 // Snackbar (unchanged)
 constexpr int SNACKBAR_Y = 232;
@@ -604,15 +637,6 @@ constexpr int GRID_LABEL_Y[6] = {175, 175, 205, 205, 235, 235};
 constexpr int GRID_VALUE_X[6] = {7, 68, 7, 68, 7, 68};
 constexpr int GRID_VALUE_Y[6] = {187, 187, 217, 217, 247, 247};
 
-// Selection rectangles — shifted 1px down for 2px-thick 1st grid divider
-constexpr int SEL_TEMP_X = 0;
-constexpr int SEL_TEMP_Y = 164;
-constexpr int SEL_TEMP_W = 64;
-constexpr int SEL_TEMP_H = 28;
-constexpr int SEL_HUM_X = 64;
-constexpr int SEL_HUM_Y = 164;
-constexpr int SEL_HUM_W = 64;
-constexpr int SEL_HUM_H = 28;
 
 // ---------------------------------------------------------------------------
 // u8g2 virtual display callback — provides geometry info only
@@ -659,7 +683,9 @@ uint8_t u8x8_d_epd_128x250_cb(u8x8_t *u8x8, uint8_t msg, uint8_t arg_int, void *
 bool is_home_like(Screen screen) { return screen == Screen::Home || screen == Screen::MainMenu; }
 
 bool is_list_screen(Screen screen) {
-  return screen == Screen::Settings || screen == Screen::SettingsChoice ||
+  return screen == Screen::TrackingMenu || screen == Screen::TrackingStatus ||
+         screen == Screen::Settings || screen == Screen::Operations ||
+         screen == Screen::DisplayTouch || screen == Screen::SettingsChoice ||
          screen == Screen::TagList || screen == Screen::Confirm || screen == Screen::About ||
          screen == Screen::HardwareTest || screen == Screen::PeripheralTest ||
          screen == Screen::GpsTest || screen == Screen::AccelTest;
@@ -667,13 +693,15 @@ bool is_list_screen(Screen screen) {
 
 // Any reason-specific shutdown screen.
 bool is_shutdown_screen(Screen screen) {
-  return screen == Screen::ShutdownUser || screen == Screen::ShutdownDischarge ||
+  return screen == Screen::ShutdownUser || screen == Screen::ShutdownCharging ||
+         screen == Screen::ShutdownCharged || screen == Screen::ShutdownDischarge ||
          screen == Screen::ShutdownTemperature || screen == Screen::ShutdownTemperatureLow;
 }
 
 // A "navigable" screen is one the user reaches through normal menu interaction.
-// Transitions between navigable screens use body-only partial for snappy UX.
-// Screens NOT listed here (PairingPasskey, Shutdown*) trigger Fast on transition.
+// Transitions between navigable screens use Partial for snappy UX (full canvas
+// when the status bar changed). Screens NOT listed here (PairingPasskey,
+// Shutdown*) trigger Fast on transition.
 bool is_navigable(Screen screen) { return is_home_like(screen) || is_list_screen(screen); }
 
 // A "menu-navigation" screen is any navigable screen except Home.
@@ -682,7 +710,24 @@ bool is_menu_navigation_screen(Screen screen) {
   return is_navigable(screen) && screen != Screen::Home;
 }
 
-bool metric_has_chart(Metric metric) { return metric != Metric::None; }
+// Every selected metric replaces the whole grid with the chart panel.
+bool metric_uses_chart_panel(Metric metric) { return metric != Metric::None; }
+
+const char *refresh_mode_name(RefreshMode mode) {
+  switch (mode) {
+  case RefreshMode::Full:
+    return "Full";
+  case RefreshMode::Fast:
+    return "Fast";
+  case RefreshMode::Partial:
+    return "Partial";
+  }
+  return "?";
+}
+
+uint32_t render_hash(const uint8_t *buf) {
+  return go_display_refresh::frame_hash(buf, go_display_geometry::PHYSICAL_BYTES);
+}
 
 bool is_float_non_negative(float value) { return value >= 0.0f; }
 
@@ -769,15 +814,6 @@ void format_co2_value(char *out, size_t out_size, int value) {
   snprintf(out, out_size, "%d", value);
 }
 
-void format_temperature_value(char *out, size_t out_size, float celsius, bool use_fahrenheit) {
-  if (!is_temperature_valid(celsius)) {
-    snprintf(out, out_size, "-");
-    return;
-  }
-  const float shown = temp_for_display(celsius, use_fahrenheit);
-  snprintf(out, out_size, "%.1f %c", shown, use_fahrenheit ? 'F' : 'C');
-}
-
 void format_humidity_value(char *out, size_t out_size, float humidity) {
   if (!is_float_non_negative(humidity)) {
     snprintf(out, out_size, "-");
@@ -844,8 +880,20 @@ void format_altitude_value(char *out, size_t out_size, float altitude_m, bool us
   snprintf(out, out_size, "%ld m", rounded_altitude_m);
 }
 
+// Grid temperature text with a UTF-8 degree sign (draw with u8g2_DrawUTF8).
+void format_temperature_cell(char *out, size_t out_size, float celsius, bool use_fahrenheit) {
+  if (!is_temperature_valid(celsius)) {
+    snprintf(out, out_size, "-");
+    return;
+  }
+  const float shown = temp_for_display(celsius, use_fahrenheit);
+  format_one_decimal(out, out_size, shown);
+  const size_t len = strlen(out);
+  snprintf(out + len, out_size - len, " \xC2\xB0%c", use_fahrenheit ? 'F' : 'C');
+}
+
 void format_chart_stat(char *out, size_t out_size, Metric metric, float value, bool use_fahrenheit,
-                       bool pm_use_usaqi) {
+                       bool pm_use_usaqi, bool use_feet) {
   switch (metric) {
   case Metric::Pm25:
     format_pm_value(out, out_size, value, pm_use_usaqi);
@@ -854,7 +902,13 @@ void format_chart_stat(char *out, size_t out_size, Metric metric, float value, b
     format_co2_value(out, out_size, static_cast<int>(lroundf(value)));
     break;
   case Metric::Temp:
-    format_temperature_value(out, out_size, value, use_fahrenheit);
+    // No unit: the chart panel title shows it, and "100.2 F" would overflow
+    // the half-width Max column.
+    if (is_temperature_valid(value)) {
+      format_one_decimal(out, out_size, temp_for_display(value, use_fahrenheit));
+    } else {
+      snprintf(out, out_size, "-");
+    }
     break;
   case Metric::Humidity:
     format_humidity_value(out, out_size, value);
@@ -863,7 +917,98 @@ void format_chart_stat(char *out, size_t out_size, Metric metric, float value, b
   case Metric::Nox:
     format_float_index_value(out, out_size, value);
     break;
+  case Metric::Pressure:
+    // One decimal and no unit: pressure moves by tenths of an hPa, and both
+    // stats must fit their half-width column (the title carries the unit).
+    if (is_float_non_negative(value)) {
+      format_one_decimal(out, out_size, value);
+    } else {
+      snprintf(out, out_size, "-");
+    }
+    break;
+  case Metric::Altitude:
+    format_altitude_value(out, out_size, value, use_feet);
+    break;
   case Metric::None:
+  default:
+    snprintf(out, out_size, "-");
+    break;
+  }
+}
+
+// Compact duration for chart time labels: "48s", "15m", "16h", "3d".
+// Rounds to the nearest unit and promotes 59.5 m to "1h" and 47.5 h to "2d".
+void format_span(char *out, size_t out_size, uint32_t seconds) {
+  constexpr uint32_t MINUTE_S = 60;
+  constexpr uint32_t HOUR_S = 60 * MINUTE_S;
+  constexpr uint32_t DAY_S = 24 * HOUR_S;
+  constexpr uint32_t MAX_HOURS_SHOWN = 48;
+  if (seconds < MINUTE_S) {
+    snprintf(out, out_size, "%" PRIu32 "s", seconds);
+  } else if (seconds < HOUR_S - MINUTE_S / 2) {
+    snprintf(out, out_size, "%" PRIu32 "m", (seconds + MINUTE_S / 2) / MINUTE_S);
+  } else if (seconds < MAX_HOURS_SHOWN * HOUR_S - HOUR_S / 2) {
+    snprintf(out, out_size, "%" PRIu32 "h", (seconds + HOUR_S / 2) / HOUR_S);
+  } else {
+    snprintf(out, out_size, "%" PRIu32 "d", (seconds + DAY_S / 2) / DAY_S);
+  }
+}
+
+bool chart_ages_known(const DisplayValues &v) {
+  return v.chart_oldest_age_s != TRACKING_TIME_INVALID_S &&
+         v.chart_newest_age_s != TRACKING_TIME_INVALID_S;
+}
+
+const char *chart_panel_title(Metric metric, bool pm_use_usaqi) {
+  switch (metric) {
+  case Metric::Pm25:
+    return pm_use_usaqi ? "PM2.5 (USAQI)" : "PM2.5 (ug/m3)";
+  case Metric::Co2:
+    return "CO2 (ppm)";
+  case Metric::Temp:
+    return "Temperature";
+  case Metric::Humidity:
+    return "Humidity";
+  case Metric::Tvoc:
+    return "TVOC";
+  case Metric::Nox:
+    return "NOx";
+  case Metric::Pressure:
+    return "Pressure";
+  case Metric::Altitude:
+    return "Altitude";
+  default:
+    return "";
+  }
+}
+
+// Current value shown in the chart panel title band, formatted as in the grid.
+void format_chart_panel_value(char *out, size_t out_size, const DisplayValues &v) {
+  switch (v.active_metric) {
+  case Metric::Pm25:
+    format_pm_value(out, out_size, v.pm25_ugm3, v.pm_use_usaqi);
+    break;
+  case Metric::Co2:
+    format_co2_value(out, out_size, v.co2_ppm);
+    break;
+  case Metric::Temp:
+    format_temperature_cell(out, out_size, v.temperature_c, v.use_fahrenheit);
+    break;
+  case Metric::Humidity:
+    format_humidity_value(out, out_size, v.humidity_pct);
+    break;
+  case Metric::Tvoc:
+    format_int_index_value(out, out_size, v.tvoc_index);
+    break;
+  case Metric::Nox:
+    format_int_index_value(out, out_size, v.nox_index);
+    break;
+  case Metric::Pressure:
+    format_pressure_value(out, out_size, v.pressure_hpa);
+    break;
+  case Metric::Altitude:
+    format_altitude_value(out, out_size, v.altitude_m, v.use_feet);
+    break;
   default:
     snprintf(out, out_size, "-");
     break;
@@ -898,6 +1043,8 @@ constexpr uint16_t WIFI_GLYPH_DISCONNECTED = 57879; // 0xE217
 
 // Battery / power glyphs from u8g2_font_siji_t_6x10
 constexpr uint16_t PLUG_GLYPH = 57410;
+
+// Outline clock (8x8) from u8g2_font_siji_t_6x10, marking a chart's time span.
 constexpr uint16_t BATTERY_GLYPH_CHARGING = 57914;
 constexpr uint16_t BATTERY_GLYPH_LVL_0_10 = 57932;
 constexpr uint16_t BATTERY_GLYPH_LVL_10_30 = 57933;
@@ -956,6 +1103,40 @@ void draw_shutdown_power_icon(u8g2_t *u, int center_x, int center_y) {
   u8g2_DrawDisc(u, center_x, center_y, RADIUS - STROKE_W, U8G2_DRAW_ALL);
   u8g2_SetDrawColor(u, 0);
   u8g2_DrawBox(u, center_x - 1, center_y - RADIUS - 4, STROKE_W, RADIUS + 5);
+}
+
+void draw_shutdown_charge_icon(u8g2_t *u, int center_x, int center_y, bool full) {
+  constexpr int BODY_W = 48;
+  constexpr int BODY_H = 30;
+  constexpr int STROKE_W = 2;
+  constexpr int TERMINAL_W = 4;
+  constexpr int TERMINAL_H = 12;
+  constexpr int BOLT_TIP_X = 4;
+  constexpr int BOLT_TIP_Y = 10;
+  constexpr int BOLT_SHOULDER_X = 8;
+  constexpr int BOLT_SHOULDER_Y = 2;
+  const int x = center_x - (BODY_W + TERMINAL_W) / 2;
+  const int y = center_y - BODY_H / 2;
+  const int bolt_x = x + BODY_W / 2;
+
+  u8g2_DrawBox(u, x, y, BODY_W, STROKE_W);
+  u8g2_DrawBox(u, x, y + BODY_H - STROKE_W, BODY_W, STROKE_W);
+  u8g2_DrawBox(u, x, y, STROKE_W, BODY_H);
+  u8g2_DrawBox(u, x + BODY_W - STROKE_W, y, STROKE_W, BODY_H);
+  u8g2_DrawBox(u, x + BODY_W, center_y - TERMINAL_H / 2, TERMINAL_W, TERMINAL_H);
+
+  if (full) {
+    constexpr int FILL_INSET = 5;
+    u8g2_DrawBox(u, x + FILL_INSET, y + FILL_INSET, BODY_W - 2 * FILL_INSET,
+                 BODY_H - 2 * FILL_INSET);
+    return;
+  }
+
+  // Overlapping filled triangles keep the lightning bolt solid at this size.
+  u8g2_DrawTriangle(u, bolt_x + BOLT_TIP_X, center_y - BOLT_TIP_Y, bolt_x - BOLT_SHOULDER_X,
+                    center_y + BOLT_SHOULDER_Y, bolt_x, center_y + BOLT_SHOULDER_Y);
+  u8g2_DrawTriangle(u, bolt_x - BOLT_TIP_X, center_y + BOLT_TIP_Y, bolt_x + BOLT_SHOULDER_X,
+                    center_y - BOLT_SHOULDER_Y, bolt_x, center_y - BOLT_SHOULDER_Y);
 }
 
 void draw_shutdown_battery_low_icon(u8g2_t *u, int center_x, int center_y) {
@@ -1149,11 +1330,12 @@ void draw_list_rows(u8g2_t *u, const DisplayValues &v, bool full_screen) {
 // ===========================================================================
 
 DisplayService::DisplayService(const Config &config)
-    : _config(config), _u8g2{}, _render_buf{}, _prev_values{}, _diff_count(0),
-      _pending_mode(RefreshMode::Full), _task_handle(nullptr), _running(false),
+    : _config(config), _u8g2{}, _render_buf{}, _prev_values{}, _partial_count(0), _fast_count(0),
+      _pending_mode(RefreshMode::Full), _panel_header{}, _task_handle(nullptr), _running(false),
       _worker_busy(false) {}
 
-bool DisplayService::init(const DisplayValues &initial, bool defer_refresh) {
+bool DisplayService::init(const DisplayValues &initial, bool defer_refresh,
+                          const DisplayValues *painted) {
   esp_err_t err = driver_init(_config);
   if (err != ESP_OK) {
     ESP_LOGE(TAG, "driver init failed: %s", esp_err_to_name(err));
@@ -1166,39 +1348,61 @@ bool DisplayService::init(const DisplayValues &initial, bool defer_refresh) {
                    U8G2_MIRROR);
   u8g2_SetFontMode(&_u8g2, 1); // Transparent font mode
 
+  // Retained panel: if the frame the caller believes is on the panel renders
+  // to the hash recorded when it was painted, the panel content is known and
+  // the first refresh can be a Partial against it.
+  bool retained = false;
+  if (painted != nullptr && s_rtc_panel_record.valid) {
+    _render_frame(*painted);
+    retained = render_hash(_render_buf) == s_rtc_panel_record.frame_hash;
+    if (retained) {
+      _partial_count = s_rtc_panel_record.partial_count;
+      _fast_count = s_rtc_panel_record.fast_count;
+    }
+  }
+  go_display_refresh::RefreshDecision decision = go_display_refresh::select_boot_refresh(
+      retained, _partial_count, _fast_count, _cleanup_policy());
+
+  if (decision.mode == RefreshMode::Partial) {
+    // _render_buf still holds the painted frame: restore it as the basemap.
+    err = driver_bus_acquire();
+    if (err == ESP_OK) {
+      err = driver_hw_init_full();
+      if (err == ESP_OK) {
+        err = driver_write_previous_plane(_render_buf);
+      }
+      driver_bus_release();
+    }
+    if (err != ESP_OK) {
+      ESP_LOGW(TAG, "basemap restore failed (%s); using Full", esp_err_to_name(err));
+      decision = {RefreshMode::Full, false};
+    }
+  }
+  ESP_LOGI(TAG, "init refresh: %s (painted=%d retained=%d partials=%u fasts=%u)",
+           refresh_mode_name(decision.mode), painted != nullptr, retained,
+           static_cast<unsigned>(_partial_count), static_cast<unsigned>(_fast_count));
+
   _prev_values = initial;
   _render_frame(initial);
+  _latch_panel(render_hash(_render_buf));
 
   if (!defer_refresh) {
-    // Synchronous initial full refresh (worker not yet started).
-    // Default behavior: backward compatible with run_full_boot() and run_fast_path().
-    err = driver_bus_acquire();
-    if (err != ESP_OK) {
-      ESP_LOGE(TAG, "bus acquire failed for init: %s", esp_err_to_name(err));
+    // Synchronous initial refresh (worker not yet started). Used by
+    // run_fast_path().
+    if (!_run_sync(decision.mode, decision.full_canvas, "initial refresh")) {
       return false;
     }
-    err = driver_hw_init_full();
-    if (err == ESP_OK) {
-      err = driver_set_basemap(_render_buf);
-    }
-    driver_bus_release();
-
-    if (err != ESP_OK) {
-      ESP_LOGE(TAG, "initial refresh failed: %s", esp_err_to_name(err));
-      return false;
-    }
-    _diff_count = 0;
   } else {
     // Deferred refresh: render is already in _render_buf. Reserve it for the
-    // worker, then signal the initial full refresh. Returns in ~10 ms.
-    // The worker acquires the SPI bus for ~3 s; any other SPI device (NAND)
-    // that tries to transmit will block until the worker releases the bus.
-    _pending_mode = RefreshMode::Full;
+    // worker, then signal the initial refresh. Returns in ~10 ms (plus the
+    // ~40 ms basemap restore for a retained Partial). The worker holds the SPI
+    // bus for the refresh; any other SPI device (NAND) that tries to transmit
+    // blocks until the worker releases the bus. A snapshot-based header that
+    // differs from the live runtime state is repainted by the first update()
+    // with a full-canvas Partial (no flash).
+    _pending_mode = decision.mode;
+    _pending_full_canvas = decision.full_canvas;
     _worker_busy.store(true); // cleared by worker when refresh completes
-    // The _prev_values header now reflects the snapshot-based initial frame,
-    // which may differ from the live runtime state the orchestrator produces.
-    // Skip the header-change penalty on the first update()
-    _defer_header_check = true;
   }
 
   // Start async worker task.
@@ -1215,7 +1419,7 @@ bool DisplayService::init(const DisplayValues &initial, bool defer_refresh) {
   }
 
   if (defer_refresh) {
-    // Kick the worker to process the initial full refresh immediately.
+    // Kick the worker to process the initial refresh immediately.
     RTOS::task_notify_give(_task_handle);
   }
 
@@ -1230,61 +1434,44 @@ bool DisplayService::update(const DisplayValues &values, bool wait) {
     return false;
   }
 
-  const bool same_list_screen =
-      is_list_screen(_prev_values.screen) && _prev_values.screen == values.screen;
-  const bool header_changed = _is_header_changed(values, _prev_values) && !_defer_header_check;
-  _defer_header_check = false;
-  const bool both_navigable = is_navigable(_prev_values.screen) && is_navigable(values.screen);
-  const bool can_partial = (both_navigable && !header_changed) || same_list_screen;
-
-  // Crossing the full-canvas session boundary forces a full refresh so no
-  // ghosting from the prior layout remains. All in-session transitions use
-  // partial refresh over y=0..249 so disjoint layouts clear cleanly without
-  // the Full waveform's ~3 s flash.
-  const bool prev_in_session = is_session_screen(_prev_values.screen);
-  const bool next_in_session = is_session_screen(values.screen);
-  const bool crossing_session_boundary = prev_in_session != next_in_session;
-
   _render_frame(values);
+  const uint32_t hash = render_hash(_render_buf);
 
   const bool entering_system_screen =
       is_shutdown_screen(values.screen) || values.screen == Screen::PairingPasskey;
-  const bool menu_navigation =
-      !entering_system_screen &&
-      (is_menu_navigation_screen(_prev_values.screen) || is_menu_navigation_screen(values.screen));
 
-  if (crossing_session_boundary) {
-    // Full refresh on the session boundary.  Reset the partial-op counter
-    // so the next session's partials start with a fresh budget.
-    _pending_mode = RefreshMode::Full;
-    _diff_count = 0;
-    _menu_exited = false;
-  } else if (prev_in_session && next_in_session) {
-    // Intra-session transitions (Info text update, Provisioning status
-    // change, Provisioning <-> ProvisioningConfirm, No <-> Yes) are always
-    // full-canvas partial refreshes.  The partial-op counter is NOT
-    // consulted inside the session.
-    _pending_mode = RefreshMode::Partial;
-    _menu_exited = false;
-  } else if (menu_navigation) {
-    _pending_mode = RefreshMode::Partial;
-    _menu_exited = true;
-  } else if (_diff_count >= _config.max_partial_ops) {
-    _pending_mode = RefreshMode::Full;
-  } else if (_menu_exited) {
-    _pending_mode = RefreshMode::Fast;
-  } else if (can_partial) {
-    _pending_mode = RefreshMode::Partial;
-  } else {
-    _pending_mode = RefreshMode::Fast;
-  }
+  // Tracking Status is a list (menu-navigation) screen: its 5 s repaints stay
+  // flash-free Partials, the cleanup cap is deferred while it is open, and a
+  // changed status bar is repainted with a full-canvas Partial.
+  // Crossing the full-canvas session boundary forces a Full refresh so no
+  // ghosting from the prior layout remains; in-session transitions use a
+  // full-canvas Partial. See go_display_refresh.h for the complete policy.
+  go_display_refresh::RefreshInputs in{};
+  in.prev_in_session = is_session_screen(_prev_values.screen);
+  in.next_in_session = is_session_screen(values.screen);
+  in.menu_navigation = !entering_system_screen && (is_menu_navigation_screen(_prev_values.screen) ||
+                                                   is_menu_navigation_screen(values.screen));
+  in.both_navigable = is_navigable(_prev_values.screen) && is_navigable(values.screen);
+  in.header_changed = !_panel_known || _is_header_changed();
+  in.cleanup_requested = _cleanup_requested;
+  in.partial_count = _partial_count;
+  in.fast_count = _fast_count;
 
-  // Clear flag after any full-screen refresh (Full or Fast rewrites everything).
-  if (_pending_mode != RefreshMode::Partial) {
-    _menu_exited = false;
-  }
-
+  const go_display_refresh::RefreshDecision decision =
+      go_display_refresh::select_refresh(in, _cleanup_policy());
+  _cleanup_requested = false;
   _prev_values = values;
+
+  if (decision.mode == RefreshMode::Partial && _panel_known && hash == _panel_hash) {
+    // Identical frame: a Partial would change no pixels. Skipping it keeps it
+    // from counting toward the cleanup cap.
+    _release_framebuffer();
+    return true;
+  }
+
+  _pending_mode = decision.mode;
+  _pending_full_canvas = decision.full_canvas;
+  _latch_panel(hash);
 
   RTOS::task_notify_give(_task_handle);
   return true;
@@ -1293,23 +1480,8 @@ bool DisplayService::update(const DisplayValues &values, bool wait) {
 void DisplayService::update_sync(const DisplayValues &values) {
   (void)_claim_framebuffer(true);
   _render_frame(values);
-
-  esp_err_t err = driver_bus_acquire();
-  if (err != ESP_OK) {
-    ESP_LOGE(TAG, "bus acquire failed for sync update: %s", esp_err_to_name(err));
-    _release_framebuffer();
-    return;
-  }
-  err = driver_hw_init_full();
-  if (err == ESP_OK) {
-    err = driver_set_basemap(_render_buf);
-  }
-  driver_bus_release();
-
-  if (err != ESP_OK) {
-    ESP_LOGE(TAG, "sync update failed: %s", esp_err_to_name(err));
-  }
-  _diff_count = 0;
+  _latch_panel(render_hash(_render_buf));
+  (void)_run_sync(RefreshMode::Full, false, "sync update");
   _prev_values = values;
   _release_framebuffer();
 }
@@ -1323,23 +1495,8 @@ void DisplayService::flush() {
 void DisplayService::clear() {
   (void)_claim_framebuffer(true);
   memset(_render_buf, 0xFF, sizeof(_render_buf));
-
-  esp_err_t err = driver_bus_acquire();
-  if (err != ESP_OK) {
-    ESP_LOGE(TAG, "bus acquire failed for clear: %s", esp_err_to_name(err));
-    _release_framebuffer();
-    return;
-  }
-  err = driver_hw_init_full();
-  if (err == ESP_OK) {
-    err = driver_set_basemap(_render_buf);
-  }
-  driver_bus_release();
-
-  if (err != ESP_OK) {
-    ESP_LOGE(TAG, "clear failed: %s", esp_err_to_name(err));
-  }
-  _diff_count = 0;
+  _latch_panel(render_hash(_render_buf));
+  (void)_run_sync(RefreshMode::Full, false, "clear");
   _release_framebuffer();
 }
 
@@ -1383,6 +1540,80 @@ bool DisplayService::_claim_framebuffer(bool wait) {
 }
 
 void DisplayService::_release_framebuffer() { _worker_busy.store(false); }
+
+go_display_refresh::CleanupPolicy DisplayService::_cleanup_policy() const {
+  return {_config.max_partial_ops, _config.lock_cleanup_min_ops, _config.max_fast_cleanups};
+}
+
+esp_err_t DisplayService::_paint(RefreshMode mode, bool full_canvas) {
+  esp_err_t err = ESP_OK;
+  switch (mode) {
+  case RefreshMode::Full:
+    err = driver_hw_init_full();
+    if (err == ESP_OK)
+      err = driver_set_basemap(_render_buf);
+    _partial_count = 0;
+    _fast_count = 0;
+    break;
+
+  case RefreshMode::Fast:
+    err = driver_hw_init_fast();
+    if (err == ESP_OK)
+      err = driver_fast_write(_render_buf);
+    if (err == ESP_OK)
+      err = driver_fast_commit();
+    _partial_count = 0;
+    if (_fast_count < UINT8_MAX) {
+      _fast_count++;
+    }
+    break;
+
+  case RefreshMode::Partial:
+    err = driver_part_begin();
+    if (err == ESP_OK) {
+      // Full canvas when the session screen owns y=0..17 or the status bar
+      // changed; otherwise body-only leaves the unchanged header untouched.
+      const auto region = go_display_geometry::partial_region(full_canvas);
+      err = driver_part_write_region(0, region.y, _render_buf + region.byte_offset, region.height,
+                                     SCREEN_W);
+    }
+    if (err == ESP_OK)
+      err = driver_part_commit();
+    if (_partial_count < UINT8_MAX) {
+      _partial_count++;
+    }
+    break;
+  }
+
+  if (err == ESP_OK) {
+    s_rtc_panel_record = {_panel_hash, _partial_count, _fast_count, true};
+  } else {
+    // Panel content is unknown: force full-canvas refreshes and a Full on wake.
+    s_rtc_panel_record.valid = false;
+    _panel_known = false;
+  }
+  if (mode != RefreshMode::Partial) {
+    // Flashing refreshes are rare; log them so flashes can be matched to a cause.
+    ESP_LOGI(TAG, "%s refresh (fasts since Full=%u)", refresh_mode_name(mode),
+             static_cast<unsigned>(_fast_count));
+  }
+  return err;
+}
+
+bool DisplayService::_run_sync(RefreshMode mode, bool full_canvas, const char *what) {
+  esp_err_t err = driver_bus_acquire();
+  if (err != ESP_OK) {
+    ESP_LOGE(TAG, "bus acquire failed for %s: %s", what, esp_err_to_name(err));
+    return false;
+  }
+  err = _paint(mode, full_canvas);
+  driver_bus_release();
+  if (err != ESP_OK) {
+    ESP_LOGE(TAG, "%s failed: %s", what, esp_err_to_name(err));
+    return false;
+  }
+  return true;
+}
 
 // ===========================================================================
 // DisplayService — rendering pipeline
@@ -1435,7 +1666,11 @@ void DisplayService::_render_frame(const DisplayValues &v) {
     _draw_home(v);
     _draw_menu_overlay(v);
     break;
+  case Screen::TrackingMenu:
+  case Screen::TrackingStatus:
   case Screen::Settings:
+  case Screen::Operations:
+  case Screen::DisplayTouch:
   case Screen::SettingsChoice:
   case Screen::TagList:
   case Screen::Confirm:
@@ -1447,6 +1682,8 @@ void DisplayService::_render_frame(const DisplayValues &v) {
     _draw_full_screen_list(v);
     break;
   case Screen::ShutdownUser:
+  case Screen::ShutdownCharging:
+  case Screen::ShutdownCharged:
   case Screen::ShutdownDischarge:
   case Screen::ShutdownTemperature:
   case Screen::ShutdownTemperatureLow:
@@ -1472,13 +1709,16 @@ void DisplayService::_render_frame(const DisplayValues &v) {
   _draw_snackbar(v);
 }
 
-bool DisplayService::_is_header_changed(const DisplayValues &a, const DisplayValues &b) const {
-  return a.battery_pct != b.battery_pct || a.is_battery_charging != b.is_battery_charging ||
-         a.is_plugged_in != b.is_plugged_in || a.locked != b.locked ||
-         a.ble_enabled != b.ble_enabled || a.ble_connected != b.ble_connected ||
-         a.wifi_enabled != b.wifi_enabled || a.wifi_connected != b.wifi_connected ||
-         a.gps_enabled != b.gps_enabled || a.gps_fix != b.gps_fix ||
-         a.tracking_active != b.tracking_active;
+// Compares rendered pixels, not DisplayValues fields: a battery percentage
+// inside the same glyph bucket, or a hidden icon's state, changes nothing.
+bool DisplayService::_is_header_changed() const {
+  return memcmp(_render_buf, _panel_header, sizeof(_panel_header)) != 0;
+}
+
+void DisplayService::_latch_panel(uint32_t hash) {
+  memcpy(_panel_header, _render_buf, sizeof(_panel_header));
+  _panel_hash = hash;
+  _panel_known = true;
 }
 
 // ===========================================================================
@@ -1534,10 +1774,20 @@ void DisplayService::_draw_status_bar(const DisplayValues &v) {
   }
 
   // 3. Tracking dot (right-pinned; shifts left when plug icon is present)
-  if (v.tracking_active) {
+  if (tracking_session_active(v.tracking_state)) {
     const bool plug_visible = v.is_plugged_in && !v.is_battery_charging;
     const int track_x = plug_visible ? (BATTERY_X - 10 - ICON_GAP - ICON_GAP - 2) : TRACKING_X;
-    u8g2_DrawFilledEllipse(&_u8g2, track_x, ELLIPSE_CY, 2, 2, U8G2_DRAW_ALL);
+    if (v.tracking_state == TrackingState::Paused) {
+      constexpr int PAUSE_BAR_WIDTH = 2;
+      constexpr int PAUSE_BAR_HEIGHT = 6;
+      constexpr int PAUSE_BAR_OFFSET = 3;
+      u8g2_DrawBox(&_u8g2, track_x - PAUSE_BAR_OFFSET, ELLIPSE_CY - PAUSE_BAR_HEIGHT / 2,
+                   PAUSE_BAR_WIDTH, PAUSE_BAR_HEIGHT);
+      u8g2_DrawBox(&_u8g2, track_x + PAUSE_BAR_OFFSET - PAUSE_BAR_WIDTH,
+                   ELLIPSE_CY - PAUSE_BAR_HEIGHT / 2, PAUSE_BAR_WIDTH, PAUSE_BAR_HEIGHT);
+    } else {
+      u8g2_DrawFilledEllipse(&_u8g2, track_x, ELLIPSE_CY, 2, 2, U8G2_DRAW_ALL);
+    }
   }
 
   // 4. Battery + optional plug icon (right-pinned, fixed position)
@@ -1564,52 +1814,21 @@ void DisplayService::_draw_home(const DisplayValues &v) {
     return;
   }
 
-  const bool chart_visible = metric_has_chart(v.active_metric);
-  const bool pm_selected = (v.active_metric == Metric::Pm25);
-  const bool co2_selected = (v.active_metric == Metric::Co2);
-  const bool temp_selected = (v.active_metric == Metric::Temp);
-  const bool hum_selected = (v.active_metric == Metric::Humidity);
+  const bool chart_panel = metric_uses_chart_panel(v.active_metric);
 
   // --- Grid dividers (full 128px width) ---
-  // 1st divider: always 2px thick
+  // 1st divider: always 2px thick (also the chart panel's top border)
   u8g2_DrawHLine(&_u8g2, 0, GRID_DIVIDER_0_Y, SCREEN_W);
   u8g2_DrawHLine(&_u8g2, 0, GRID_DIVIDER_0_Y + 1, SCREEN_W);
-  u8g2_DrawHLine(&_u8g2, 0, GRID_DIVIDER_1_Y, SCREEN_W);
-  // 3rd divider: 2px thick when chart visible, 1px otherwise
-  u8g2_DrawHLine(&_u8g2, 0, GRID_DIVIDER_2_Y, SCREEN_W);
-  if (chart_visible) {
-    u8g2_DrawHLine(&_u8g2, 0, GRID_DIVIDER_2_Y + 1, SCREEN_W);
-  }
-
-  // Vertical divider
-  if (chart_visible) {
-    // Only rows 1–2 when chart active
-    u8g2_DrawVLine(&_u8g2, GRID_DIVIDER_X, GRID_DIVIDER_0_Y, GRID_DIVIDER_2_Y - GRID_DIVIDER_0_Y);
-  } else {
-    // All 3 rows
+  if (!chart_panel) {
+    u8g2_DrawHLine(&_u8g2, 0, GRID_DIVIDER_1_Y, SCREEN_W);
+    u8g2_DrawHLine(&_u8g2, 0, GRID_DIVIDER_2_Y, SCREEN_W);
     u8g2_DrawVLine(&_u8g2, GRID_DIVIDER_X, GRID_DIVIDER_0_Y, 249 - GRID_DIVIDER_0_Y);
-  }
-
-  // --- Selection rectangles (filled black with white text) ---
-  if (pm_selected) {
-    u8g2_DrawBox(&_u8g2, 0, PM_BLOCK_Y, SCREEN_W, PM_BLOCK_H);
-  }
-  if (co2_selected) {
-    u8g2_DrawBox(&_u8g2, 0, CO2_BLOCK_Y, SCREEN_W, CO2_BLOCK_H);
-  }
-  if (temp_selected) {
-    u8g2_DrawBox(&_u8g2, SEL_TEMP_X, SEL_TEMP_Y, SEL_TEMP_W, SEL_TEMP_H);
-  }
-  if (hum_selected) {
-    u8g2_DrawBox(&_u8g2, SEL_HUM_X, SEL_HUM_Y, SEL_HUM_W, SEL_HUM_H);
   }
 
   char buf[24];
 
   // --- PM2.5 hero section ---
-  if (pm_selected)
-    u8g2_SetDrawColor(&_u8g2, 1);
-
   // Dual-font label: "PM2.5" in Logisoso16 + "(ug/m3)" or "(USAQI)" in HelvR12
   {
     const char *pm_name = "PM2.5";
@@ -1633,13 +1852,7 @@ void DisplayService::_draw_home(const DisplayValues &v) {
   format_pm_value(buf, sizeof(buf), v.pm25_ugm3, v.pm_use_usaqi);
   draw_centered_text(&_u8g2, SCREEN_W / 2, PM_VALUE_BASELINE_Y, buf);
 
-  if (pm_selected)
-    u8g2_SetDrawColor(&_u8g2, 0);
-
   // --- CO2 hero section ---
-  if (co2_selected)
-    u8g2_SetDrawColor(&_u8g2, 1);
-
   // Dual-font label: "CO2" in Logisoso16 + "(ppm)" in HelvR12
   {
     const char *co2_name = "CO2";
@@ -1663,69 +1876,38 @@ void DisplayService::_draw_home(const DisplayValues &v) {
   format_co2_value(buf, sizeof(buf), v.co2_ppm);
   draw_centered_text(&_u8g2, SCREEN_W / 2, CO2_VALUE_BASELINE_Y, buf);
 
-  if (co2_selected)
-    u8g2_SetDrawColor(&_u8g2, 0);
+  if (chart_panel) {
+    _draw_chart_panel(v);
+    return;
+  }
 
   // --- Grid cells ---
   char temp_buf[24];
   char hum_buf[24];
 
   // Temperature grid cell uses DrawUTF8 for the degree symbol.
-  // format_temperature_value is preserved for chart stats; here we format
-  // with the UTF-8 degree sign for display.
-  if (!is_temperature_valid(v.temperature_c)) {
-    snprintf(temp_buf, sizeof(temp_buf), "-");
-  } else {
-    const float shown = temp_for_display(v.temperature_c, v.use_fahrenheit);
-    format_one_decimal(temp_buf, sizeof(temp_buf), shown);
-    const size_t len = strlen(temp_buf);
-    snprintf(temp_buf + len, sizeof(temp_buf) - len, " \xC2\xB0%c", v.use_fahrenheit ? 'F' : 'C');
-  }
+  format_temperature_cell(temp_buf, sizeof(temp_buf), v.temperature_c, v.use_fahrenheit);
   format_humidity_value(hum_buf, sizeof(hum_buf), v.humidity_pct);
 
-  // Row 1: Temp / Humidity (always visible)
-  if (temp_selected)
-    u8g2_SetDrawColor(&_u8g2, 1);
+  // Row 1: Temp / Humidity
   draw_cell(&_u8g2, 0, "Temperature", temp_buf, true);
-  if (temp_selected)
-    u8g2_SetDrawColor(&_u8g2, 0);
-
-  if (hum_selected)
-    u8g2_SetDrawColor(&_u8g2, 1);
   draw_cell(&_u8g2, 1, "Humidity", hum_buf, false);
-  if (hum_selected)
-    u8g2_SetDrawColor(&_u8g2, 0);
 
-  // Row 2: TVOC/NOx or Min/Max (conditional)
-  if (chart_visible) {
-    char min_buf[24];
-    char max_buf[24];
-    format_chart_stat(min_buf, sizeof(min_buf), v.active_metric, v.chart_min, v.use_fahrenheit,
-                      v.pm_use_usaqi);
-    format_chart_stat(max_buf, sizeof(max_buf), v.active_metric, v.chart_max, v.use_fahrenheit,
-                      v.pm_use_usaqi);
-    draw_cell(&_u8g2, 2, "Min", min_buf, false);
-    draw_cell(&_u8g2, 3, "Max", max_buf, false);
-  } else {
-    char tvoc_buf[24];
-    char nox_buf[24];
-    format_int_index_value(tvoc_buf, sizeof(tvoc_buf), v.tvoc_index);
-    format_int_index_value(nox_buf, sizeof(nox_buf), v.nox_index);
-    draw_cell(&_u8g2, 2, "TVOC", tvoc_buf, false);
-    draw_cell(&_u8g2, 3, "NOx", nox_buf, false);
-  }
+  // Row 2: TVOC / NOx
+  char tvoc_buf[24];
+  char nox_buf[24];
+  format_int_index_value(tvoc_buf, sizeof(tvoc_buf), v.tvoc_index);
+  format_int_index_value(nox_buf, sizeof(nox_buf), v.nox_index);
+  draw_cell(&_u8g2, 2, "TVOC", tvoc_buf, false);
+  draw_cell(&_u8g2, 3, "NOx", nox_buf, false);
 
-  // Row 3: Pressure/Altitude or Chart (conditional)
-  if (chart_visible) {
-    _draw_chart(v);
-  } else {
-    char pressure_buf[24];
-    char altitude_buf[24];
-    format_pressure_value(pressure_buf, sizeof(pressure_buf), v.pressure_hpa);
-    format_altitude_value(altitude_buf, sizeof(altitude_buf), v.altitude_m, v.use_feet);
-    draw_cell(&_u8g2, 4, "Pressure", pressure_buf, false);
-    draw_cell(&_u8g2, 5, "Altitude", altitude_buf, false);
-  }
+  // Row 3: Pressure / Altitude
+  char pressure_buf[24];
+  char altitude_buf[24];
+  format_pressure_value(pressure_buf, sizeof(pressure_buf), v.pressure_hpa);
+  format_altitude_value(altitude_buf, sizeof(altitude_buf), v.altitude_m, v.use_feet);
+  draw_cell(&_u8g2, 4, "Pressure", pressure_buf, false);
+  draw_cell(&_u8g2, 5, "Altitude", altitude_buf, false);
 }
 
 void DisplayService::_draw_menu_overlay(const DisplayValues &v) {
@@ -1781,6 +1963,14 @@ void DisplayService::_draw_shutdown(Screen s) {
 
   // Reason-specific icon + text.
   switch (s) {
+  case Screen::ShutdownCharging:
+    draw_shutdown_charge_icon(&_u8g2, SCREEN_W / 2, SHUTDOWN_ICON_CENTER_Y, false);
+    draw_shutdown_text(&_u8g2, "Charging", "", "Hold power button", "to turn on");
+    break;
+  case Screen::ShutdownCharged:
+    draw_shutdown_charge_icon(&_u8g2, SCREEN_W / 2, SHUTDOWN_ICON_CENTER_Y, true);
+    draw_shutdown_text(&_u8g2, "Battery Full", "", "Hold power button", "to turn on");
+    break;
   case Screen::ShutdownDischarge:
     draw_shutdown_battery_low_icon(&_u8g2, SCREEN_W / 2, SHUTDOWN_ICON_CENTER_Y);
     draw_shutdown_text(&_u8g2, "Battery", "critically low", "Connect charger", "Charge before use");
@@ -2019,9 +2209,8 @@ void DisplayService::_draw_provisioning_confirm(const DisplayValues &v) {
 
 void DisplayService::_draw_getting_started(const DisplayValues &v) {
   // Simplified sibling of _draw_provisioning with its own layout: a
-  // chunkier 3px QR and a single action row, no status band / helper text.
-  // The whole stack (title -> QR -> caption -> instruction -> button) is
-  // vertically centered in the 250px canvas. See first_boot_onboarding.md.
+  // chunkier 3px QR and a single hold instruction on first boot.
+  // Title -> QR -> caption -> instruction -> action.
   constexpr int TITLE_L1_Y = 44;
   constexpr int TITLE_L2_Y = 64;
   constexpr int QR_TOP_Y = 68;
@@ -2029,6 +2218,10 @@ void DisplayService::_draw_getting_started(const DisplayValues &v) {
   constexpr int QR_CAPTION_Y = 174;
   constexpr int INSTRUCTION_Y = 195;
   constexpr int ACTION_ROW_Y = 204;
+  constexpr int ACTION_X = 12;
+  constexpr int ACTION_W = SCREEN_W - 2 * ACTION_X;
+  constexpr int HOLD_ACTION_H = 24;
+  constexpr int HOLD_ACTION_LABEL_Y = 220;
 
   // --- Title (same font as the Provisioning page) ---
   u8g2_SetFont(&_u8g2, u8g2_font_logisoso16_tr);
@@ -2040,15 +2233,23 @@ void DisplayService::_draw_getting_started(const DisplayValues &v) {
 
   // --- QR caption ---
   u8g2_SetFont(&_u8g2, u8g2_font_helvB08_tf);
-  draw_centered_text(&_u8g2, SCREEN_W / 2, QR_CAPTION_Y, "Scan to set up");
+  draw_centered_text(&_u8g2, SCREEN_W / 2, QR_CAPTION_Y, "Scan for guide");
 
   // --- Instruction (names the button action) ---
   u8g2_SetFont(&_u8g2, u8g2_font_helvR08_tr);
   draw_centered_text(&_u8g2, SCREEN_W / 2, INSTRUCTION_Y, "Or just use it right now");
 
-  // --- Single action row (label from v.rows[0]) ---
+  // --- Single action (label from v.rows[0]) ---
   const char *row0 = (v.row_count >= 1) ? v.rows[0].text : "";
-  draw_provisioning_action_row(&_u8g2, row0, ACTION_ROW_Y, /*selected=*/true);
+  if (v.getting_started_from_boot) {
+    u8g2_DrawBox(&_u8g2, ACTION_X, ACTION_ROW_Y, ACTION_W, HOLD_ACTION_H);
+    u8g2_SetDrawColor(&_u8g2, 1);
+    u8g2_SetFont(&_u8g2, u8g2_font_helvB08_tf);
+    draw_centered_text(&_u8g2, SCREEN_W / 2, HOLD_ACTION_LABEL_Y, row0);
+    u8g2_SetDrawColor(&_u8g2, 0);
+  } else {
+    draw_provisioning_action_row(&_u8g2, row0, ACTION_ROW_Y, /*selected=*/true);
+  }
 }
 
 namespace {
@@ -2198,35 +2399,122 @@ void DisplayService::_draw_fg_learning_dashboard(const DisplayValues &v) {
   draw_centered_text(&_u8g2, SCREEN_W / 2, 230, buf);
 }
 
-void DisplayService::_draw_chart(const DisplayValues &v) {
-  // Polyline only — no axes, no border lines.
+void DisplayService::_draw_chart_panel(const DisplayValues &v) {
+  // Title band (inverted): metric name left, current value right-aligned.
+  u8g2_DrawBox(&_u8g2, 0, CHART_PANEL_TITLE_Y, SCREEN_W, CHART_PANEL_TITLE_H);
+  u8g2_SetDrawColor(&_u8g2, 1);
+  u8g2_SetFont(&_u8g2, u8g2_font_helvB08_tf);
+  draw_text(&_u8g2, CHART_PANEL_LEFT_X, CHART_PANEL_TITLE_BASELINE_Y,
+            chart_panel_title(v.active_metric, v.pm_use_usaqi));
+  char value_buf[24];
+  format_chart_panel_value(value_buf, sizeof(value_buf), v);
+  const int value_w = static_cast<int>(u8g2_GetUTF8Width(&_u8g2, value_buf));
+  u8g2_DrawUTF8(&_u8g2, static_cast<u8g2_uint_t>(CHART_PANEL_VALUE_RIGHT_X - value_w),
+                static_cast<u8g2_uint_t>(CHART_PANEL_TITLE_BASELINE_Y), value_buf);
+  u8g2_SetDrawColor(&_u8g2, 0);
+
+  if (v.chart_samples == nullptr || v.chart_count == 0) {
+    u8g2_SetFont(&_u8g2, u8g2_font_helvR08_tr);
+    draw_centered_text(&_u8g2, SCREEN_W / 2, CHART_PANEL_EMPTY_BASELINE_Y, "No history yet");
+    return;
+  }
+
+  // Min / Max line, aligned with the grid's two columns.
+  char min_buf[24];
+  char max_buf[24];
+  format_chart_stat(min_buf, sizeof(min_buf), v.active_metric, v.chart_min, v.use_fahrenheit,
+                    v.pm_use_usaqi, v.use_feet);
+  format_chart_stat(max_buf, sizeof(max_buf), v.active_metric, v.chart_max, v.use_fahrenheit,
+                    v.pm_use_usaqi, v.use_feet);
+  const struct {
+    int x;
+    const char *label;
+    const char *value;
+  } stats[] = {{CHART_PANEL_LEFT_X, "Min", min_buf}, {CHART_PANEL_RIGHT_X, "Max", max_buf}};
+  for (const auto &stat : stats) {
+    u8g2_SetFont(&_u8g2, u8g2_font_helvR08_tr);
+    draw_text(&_u8g2, stat.x, CHART_PANEL_STATS_BASELINE_Y, stat.label);
+    const int label_w = static_cast<int>(u8g2_GetStrWidth(&_u8g2, stat.label));
+    u8g2_SetFont(&_u8g2, u8g2_font_helvB08_tf);
+    u8g2_DrawUTF8(&_u8g2, static_cast<u8g2_uint_t>(stat.x + label_w + CHART_PANEL_LABEL_GAP),
+                  static_cast<u8g2_uint_t>(CHART_PANEL_STATS_BASELINE_Y), stat.value);
+  }
+
+  _draw_chart(v, PLOT_X, CHART_PANEL_PLOT_Y, PLOT_W, CHART_PANEL_PLOT_H);
+
+  // Time axis: age of the oldest plotted sample on the left, newest on the
+  // right ("now" when it is under a minute old).
+  if (chart_ages_known(v)) {
+    char left_buf[16];
+    char right_buf[16];
+    char span_buf[12];
+    format_span(span_buf, sizeof(span_buf), v.chart_oldest_age_s);
+    snprintf(left_buf, sizeof(left_buf), "-%s", span_buf);
+    if (v.chart_newest_age_s < CHART_NOW_THRESHOLD_S) {
+      snprintf(right_buf, sizeof(right_buf), "now");
+    } else {
+      format_span(span_buf, sizeof(span_buf), v.chart_newest_age_s);
+      snprintf(right_buf, sizeof(right_buf), "-%s", span_buf);
+    }
+    u8g2_SetFont(&_u8g2, u8g2_font_helvR08_tr);
+    draw_text(&_u8g2, PLOT_X, CHART_PANEL_TIME_BASELINE_Y, left_buf);
+    const int right_w = static_cast<int>(u8g2_GetStrWidth(&_u8g2, right_buf));
+    draw_text(&_u8g2, CHART_RIGHT_X + 1 - right_w, CHART_PANEL_TIME_BASELINE_Y, right_buf);
+  }
+}
+
+void DisplayService::_draw_chart(const DisplayValues &v, int plot_x, int plot_y, int plot_w,
+                                 int plot_h_px) {
+  // Polyline only — no axes, no border lines. Samples are evenly spaced in
+  // time; NaN marks a gap, where the line breaks.
   if (v.chart_samples == nullptr || v.chart_count == 0)
     return;
 
   const float range = v.chart_max - v.chart_min;
-  const int plot_h = PLOT_H - 1; // drawable height range
-  int prev_x = PLOT_X;
-  int prev_y = PLOT_Y + plot_h / 2;
+  const int plot_h = plot_h_px - 1; // drawable height range
+  const int last = static_cast<int>(v.chart_count) - 1;
+  bool have_prev = false;
+  int prev_x = plot_x;
+  int prev_y = plot_y + plot_h / 2;
 
-  for (int x = 0; x < PLOT_W; ++x) {
-    const int sample_index =
-        (x * static_cast<int>(v.chart_count - 1)) / ((PLOT_W > 1) ? (PLOT_W - 1) : 1);
-    const float sample = v.chart_samples[sample_index];
+  for (int x = 0; x < plot_w; ++x) {
+    // Position of this column along the samples, interpolated between the
+    // two nearest ones so sparse histories draw slopes, not steps.
+    const float pos = (plot_w > 1 && last > 0)
+                          ? static_cast<float>(x * last) / static_cast<float>(plot_w - 1)
+                          : 0.0f;
+    const int i0 = static_cast<int>(pos);
+    const int i1 = i0 < last ? i0 + 1 : i0;
+    const float a = v.chart_samples[i0];
+    const float b = v.chart_samples[i1];
+    float sample = a;
+    if (i1 != i0 && !std::isnan(a) && !std::isnan(b)) {
+      sample = a + (b - a) * (pos - static_cast<float>(i0));
+    } else if (std::isnan(a) && pos - static_cast<float>(i0) > 0.5f) {
+      sample = b; // the column sits nearer the next sample
+    }
+    if (std::isnan(sample)) {
+      have_prev = false;
+      continue;
+    }
 
-    int y = PLOT_Y + plot_h / 2;
+    int y = plot_y + plot_h / 2;
     if (range > 0.001f) {
       const float norm = (sample - v.chart_min) / range;
-      y = PLOT_Y + plot_h - static_cast<int>(norm * static_cast<float>(plot_h));
+      y = plot_y + plot_h - static_cast<int>(norm * static_cast<float>(plot_h));
     }
-    if (y < PLOT_Y)
-      y = PLOT_Y;
-    if (y > PLOT_Y + plot_h)
-      y = PLOT_Y + plot_h;
+    if (y < plot_y)
+      y = plot_y;
+    if (y > plot_y + plot_h)
+      y = plot_y + plot_h;
 
-    const int draw_x = PLOT_X + x;
-    if (x > 0) {
+    const int draw_x = plot_x + x;
+    if (have_prev) {
       u8g2_DrawLine(&_u8g2, prev_x, prev_y, draw_x, y);
+    } else {
+      u8g2_DrawPixel(&_u8g2, draw_x, y);
     }
+    have_prev = true;
     prev_x = draw_x;
     prev_y = y;
   }
@@ -2256,43 +2544,7 @@ void DisplayService::_worker_loop() {
       continue;
     }
 
-    switch (_pending_mode) {
-    case RefreshMode::Full:
-      err = driver_hw_init_full();
-      if (err == ESP_OK)
-        err = driver_set_basemap(_render_buf);
-      _diff_count = 0;
-      break;
-
-    case RefreshMode::Fast:
-      err = driver_hw_init_fast();
-      if (err == ESP_OK)
-        err = driver_fast_write(_render_buf);
-      if (err == ESP_OK)
-        err = driver_fast_commit();
-      if (_diff_count < UINT8_MAX) {
-        _diff_count++;
-      }
-      break;
-
-    case RefreshMode::Partial:
-      err = driver_part_begin();
-      if (err == ESP_OK) {
-        // Full-canvas session screens own the title region (y=0..17), so a
-        // body-only partial would leave prior pixels there. Everything else
-        // stays body-only.
-        const auto region =
-            go_display_geometry::partial_region(is_session_screen(_prev_values.screen));
-        err = driver_part_write_region(0, region.y, _render_buf + region.byte_offset, region.height,
-                                       SCREEN_W);
-      }
-      if (err == ESP_OK)
-        err = driver_part_commit();
-      if (_diff_count < UINT8_MAX) {
-        _diff_count++;
-      }
-      break;
-    }
+    err = _paint(_pending_mode, _pending_full_canvas);
 
     if (err != ESP_OK) {
       ESP_LOGE(TAG, "worker: refresh failed: %s", esp_err_to_name(err));

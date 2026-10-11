@@ -196,6 +196,22 @@ bool DPS368::read(PressureData &out) {
   return true;
 }
 
+bool DPS368::standby() {
+  if (_dev_handle == nullptr) {
+    return true;
+  }
+
+  // MEAS_CTRL occupies MEAS_CFG bits 2:0; the remaining bits are read-only
+  // status flags, so a full-register write of MODE_STANDBY is safe.
+  if (!_write_register(REG_MEAS_CFG, MODE_STANDBY)) {
+    ESP_LOGW(TAG, "Failed to enter standby");
+    return false;
+  }
+
+  ESP_LOGI(TAG, "Standby for sleep");
+  return true;
+}
+
 bool DPS368::supports_temp_hum() const { return true; }
 
 TempHumData DPS368::temp_hum_data() { return _last_temp_hum; }

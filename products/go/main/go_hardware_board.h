@@ -38,6 +38,7 @@ public:
   BmsDevice *bms() override;
   SensorManager &sensors(bool warm) override;
   StorageService &storage() override;
+  StorageService &storage_unmounted() override;
   DisplayService &display() override;
   LedService &led_service() override;
   BuzzerService &buzzer_service() override;
@@ -98,6 +99,7 @@ private:
   bool _pm_fan_inited = false;
   SensorManager *_sensor_manager = nullptr;
   StorageService *_storage = nullptr;
+  bool _storage_mount_attempted = false;
   DisplayService *_display = nullptr;
   LP5036 *_lp5036 = nullptr;
   LedService *_led_service = nullptr;

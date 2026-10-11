@@ -50,6 +50,12 @@ public:
     return false;
   }
 
+  /// Stop continuous / periodic measurement and leave the sensor idle before
+  /// a cold ESP deep sleep. The next init() must restart measurement. Reads
+  /// fail until then. Default no-op that succeeds, for sensors without an
+  /// idle mode. Returns false only when the stop command failed.
+  virtual bool stop_measurement() { return true; }
+
 private:
 };
 

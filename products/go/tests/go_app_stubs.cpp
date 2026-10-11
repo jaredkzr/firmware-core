@@ -27,6 +27,7 @@
 
 #include <algorithm>
 #include <cstring>
+#include <functional>
 #include <string>
 
 // ============================================================================
@@ -43,6 +44,7 @@ bool rtc_snapshot_valid = false;
 // --- SensorManager ---
 int warmup_step_count = 0;
 int pm_sleep_count = 0;
+int idle_for_sleep_count = 0;
 Measures measures_to_return{};
 uint32_t co2_abc_period_apply_count = 0;
 int last_co2_abc_period_days = 0;
@@ -77,6 +79,8 @@ bool cache_restored = false;
 bool storage_init_called = false;
 bool resume_route_result = true;
 bool append_route_point_result = true;
+bool append_route_point_sync_failure = false;
+uint32_t route_point_count = 0;
 
 // --- PowerService ---
 bool bms_polled = false;
@@ -85,10 +89,29 @@ bool state_saved = false;
 RtcAppState last_saved_state{};
 PowerSnapshot snapshot_to_return{};
 PowerService::SleepDecision sleep_decision_to_return = {PowerService::SleepType::Deep, 60000};
+OperatingMode last_decide_sleep_mode = OperatingMode::Stationary;
+bool last_decide_sleep_ble_link = true;
 bool enter_sleep_called = false;
 uint32_t enter_sleep_duration_ms = 0;
+bool enter_sleep_ble_windows = false;
+bool portable_ble_start_result = false;
+int portable_ble_start_count = 0;
+bool ble_connected = false;
+int ble_deinit_count = 0;
 bool should_hold_pm_result = false;
 bool shutdown_called = false;
+bool power_on_reset = false;
+int power_button_level = 1;
+bool pm_power_enabled = true;
+bool ext_watchdog_fed = false;
+bool lp_feeder_started = false;
+bool shutdown_prepared = false;
+int light_sleep_count = 0;
+uint32_t light_sleep_duration_ms = 0;
+bool light_sleep_prepared = true;
+std::function<bool()> light_sleep_callback;
+int ext_watchdog_feed_count = 0;
+WakeCause wake_cause = WakeCause::PowerOn;
 
 // --- BleService ---
 bool ble_init_called = false;
@@ -101,9 +124,11 @@ bool wifi_try_fallback_called = false;
 
 // --- Orchestrator ---
 bool orchestrator_init_called = false;
+const BleService *orchestrator_ble_service = nullptr;
 bool orchestrator_run_called = false;
 WakeCause orchestrator_wake_cause = WakeCause::PowerOn;
 BootHandoff orchestrator_handoff{};
+RtcAppState orchestrator_rtc_state{};
 RtosQueueHandle orchestrator_event_queue = nullptr;
 GoLocalApiService *orchestrator_local_api = nullptr;
 SystemInfo orchestrator_local_api_system_info{};
@@ -134,6 +159,7 @@ void reset() {
 
   warmup_step_count = 0;
   pm_sleep_count = 0;
+  idle_for_sleep_count = 0;
   measures_to_return = Measures{};
   co2_abc_period_apply_count = 0;
   last_co2_abc_period_days = 0;
@@ -164,6 +190,8 @@ void reset() {
   storage_init_called = false;
   resume_route_result = true;
   append_route_point_result = true;
+  append_route_point_sync_failure = false;
+  route_point_count = 0;
 
   bms_polled = false;
   bms_poll_count = 0;
@@ -171,10 +199,29 @@ void reset() {
   last_saved_state = RtcAppState{};
   snapshot_to_return = PowerSnapshot{};
   sleep_decision_to_return = {PowerService::SleepType::Deep, 60000};
+  last_decide_sleep_mode = OperatingMode::Stationary;
+  last_decide_sleep_ble_link = true;
   enter_sleep_called = false;
   enter_sleep_duration_ms = 0;
+  enter_sleep_ble_windows = false;
+  portable_ble_start_result = false;
+  portable_ble_start_count = 0;
+  ble_connected = false;
+  ble_deinit_count = 0;
   should_hold_pm_result = false;
   shutdown_called = false;
+  power_on_reset = false;
+  power_button_level = 1;
+  pm_power_enabled = true;
+  ext_watchdog_fed = false;
+  lp_feeder_started = false;
+  shutdown_prepared = false;
+  light_sleep_count = 0;
+  light_sleep_duration_ms = 0;
+  light_sleep_prepared = true;
+  light_sleep_callback = {};
+  ext_watchdog_feed_count = 0;
+  wake_cause = WakeCause::PowerOn;
 
   ble_init_called = false;
 
@@ -184,9 +231,11 @@ void reset() {
   wifi_try_fallback_called = false;
 
   orchestrator_init_called = false;
+  orchestrator_ble_service = nullptr;
   orchestrator_run_called = false;
   orchestrator_wake_cause = WakeCause::PowerOn;
   orchestrator_handoff = BootHandoff{};
+  orchestrator_rtc_state = RtcAppState{};
   orchestrator_event_queue = nullptr;
   orchestrator_local_api = nullptr;
   orchestrator_local_api_system_info = SystemInfo{};
@@ -211,9 +260,12 @@ void reset() {
   DisplayService::spy_deep_sleep_called = false;
   DisplayService::spy_init_count = 0;
   DisplayService::spy_update_count = 0;
+  DisplayService::spy_sync_update_count = 0;
   DisplayService::spy_flush_count = 0;
   DisplayService::spy_last_screen = Screen::Home;
   DisplayService::spy_last_init_deferred = false;
+  DisplayService::spy_last_update_wait = false;
+  DisplayService::spy_worker_busy = false;
 }
 
 } // namespace test_spy
@@ -268,9 +320,10 @@ LocalServer::~LocalServer() = default;
 SensorManager::SensorManager(Sensors &sensors) : _sensors(sensors) {}
 SensorManager::~SensorManager() = default;
 
-void SensorManager::warmup_step() { test_spy::warmup_step_count++; }
+void SensorManager::warmup_step(bool /*condition_gas*/) { test_spy::warmup_step_count++; }
 void SensorManager::warmup() {}
 void SensorManager::pm_sleep() { test_spy::pm_sleep_count++; }
+void SensorManager::idle_for_sleep() { test_spy::idle_for_sleep_count++; }
 void SensorManager::pm_wake() {}
 Co2CalibrationResult SensorManager::calibrate_co2() { return Co2CalibrationResult::Unsupported; }
 Co2AbcPeriodResult SensorManager::set_co2_abc_period_days(int days) {
@@ -290,6 +343,23 @@ SensorManager::set_tvoc_nox_learning_offsets(int /*tvoc_learning_offset*/,
   return TvocNoxLearningOffsetResult::Unsupported;
 }
 void SensorManager::set_tvoc_nox_compensation(float /*temperature_c*/, float /*humidity_pct*/) {}
+bool StorageService::latest_cached(MeasuresAGo & /*out*/) const { return false; }
+
+// go_orchestrator.cpp is not linked here.
+bool start_portable_ble_services(BleService & /*ble*/, PortableWifiProvisioner & /*provisioner*/,
+                                 OtaService & /*ota*/, const char * /*serial*/) {
+  ++test_spy::portable_ble_start_count;
+  return test_spy::portable_ble_start_result;
+}
+
+bool SensorManager::get_tvoc_nox_index_state(TvocNoxIndexState & /*out*/) const { return false; }
+bool SensorManager::restore_tvoc_nox_index(const TvocNoxIndexState & /*state*/,
+                                           uint32_t /*sampling_interval_ms*/) {
+  return false;
+}
+bool SensorManager::set_tvoc_nox_sampling_interval(uint32_t /*sampling_interval_ms*/) {
+  return false;
+}
 
 Measures SensorManager::start_measures(int /*iterations*/, SensorGroup /*groups*/) {
   return test_spy::measures_to_return;
@@ -310,7 +380,8 @@ bool SensorProducer::start() {
 
 void SensorProducer::stop(bool /*sleep_pm*/) { test_spy::sensor_stopped = true; }
 
-void SensorProducer::request_measurement(uint8_t /*iterations*/, SensorGroup /*groups*/) {}
+void SensorProducer::request_measurement(uint8_t /*iterations*/, SensorGroup /*groups*/,
+                                         MeasurementOrigin /*origin*/) {}
 void SensorProducer::request_co2_calibration() {}
 void SensorProducer::request_prepare() {}
 void SensorProducer::request_pm_sleep() {}
@@ -426,19 +497,25 @@ bool StorageService::route_file_exists(uint32_t /*session_id*/) const { return f
 bool StorageService::append_route_point(const RoutePoint &point) {
   test_spy::route_point_appended = true;
   test_spy::last_route_point = point;
-  return test_spy::append_route_point_result;
+  if (test_spy::append_route_point_result || test_spy::append_route_point_sync_failure) {
+    ++test_spy::route_point_count;
+  }
+  return test_spy::append_route_point_result && !test_spy::append_route_point_sync_failure;
 }
 
-void StorageService::end_route() {
-  if (!test_spy::route_file_open)
-    return;
+bool StorageService::end_route() {
+  if (!test_spy::route_file_open) {
+    return true;
+  }
   test_spy::route_file_open = false;
   test_spy::route_ended = true;
+  test_spy::route_point_count = 0;
+  return true;
 }
 
 bool StorageService::is_route_active() const { return test_spy::route_file_open; }
 
-uint32_t StorageService::current_route_point_count() const { return 0; }
+uint32_t StorageService::current_route_point_count() const { return test_spy::route_point_count; }
 
 bool StorageService::delete_route(uint32_t /*session_id*/) { return true; }
 
@@ -480,8 +557,8 @@ bool PowerService::poll_charging_status(BmsChargingState &state) {
 }
 
 bool PowerService::poll_status(BmsStatus &status) {
-  status = test_spy::snapshot_to_return.charger_status;
-  return true;
+  status = BmsStatus{};
+  return _bms != nullptr && _bms->read_status(status);
 }
 
 bool PowerService::rekick_pmid_if_collapsed(const BmsTelemetry & /*t*/, BmsPowerSource /*src*/) {
@@ -494,21 +571,31 @@ void PowerService::recover_pm_sensor() {}
 
 bool PowerService::reset_watchdog() { return true; }
 
-void PowerService::shutdown() { test_spy::shutdown_called = true; }
+void PowerService::shutdown() {
+  test_spy::shutdown_called = true;
+  test_spy::shutdown_prepared =
+      !test_spy::lp_feeder_started && test_spy::ext_watchdog_fed && !test_spy::pm_power_enabled &&
+      DisplayService::spy_deep_sleep_called && DisplayService::spy_sync_update_count > 0 &&
+      DisplayService::spy_last_screen == Screen::ShutdownUser;
+}
 
 bool PowerService::set_watchdog_timeout_ms(uint32_t /*timeout_ms*/) { return true; }
 
 void PowerService::save_state(const RtcAppState &state) {
   test_spy::state_saved = true;
   test_spy::last_saved_state = state;
+  test_spy::rtc_state = state;
 }
 
 RtcAppState PowerService::load_state() const { return test_spy::rtc_state; }
 
 PowerService::SleepDecision PowerService::decide_sleep(const GoSettings & /*settings*/,
                                                        LockState /*lock_state*/,
-                                                       OperatingMode /*mode*/,
-                                                       uint32_t /*awake_ms*/) const {
+                                                       OperatingMode mode,
+                                                       uint32_t /*awake_ms*/,
+                                                       bool ble_link_active) const {
+  test_spy::last_decide_sleep_mode = mode;
+  test_spy::last_decide_sleep_ble_link = ble_link_active;
   return test_spy::sleep_decision_to_return;
 }
 
@@ -518,14 +605,34 @@ bool PowerService::should_hold_pm_sensor(uint32_t /*sleep_duration_ms*/) const {
 
 bool PowerService::should_sleep_pm_sensor(uint32_t /*measure_interval_ms*/) const { return false; }
 
-void PowerService::set_pm_power(bool /*on*/) {}
+void PowerService::set_pm_power(bool on) { test_spy::pm_power_enabled = on; }
 
-void PowerService::enter_sleep(uint32_t sleep_duration_ms) {
+void PowerService::enter_sleep(uint32_t sleep_duration_ms, bool ble_windows) {
   test_spy::enter_sleep_called = true;
   test_spy::enter_sleep_duration_ms = sleep_duration_ms;
+  test_spy::enter_sleep_ble_windows = ble_windows;
 }
 
-WakeCause PowerService::get_wake_cause() { return WakeCause::PowerOn; }
+void PowerService::resume_ble_window_sleep(int /*pin_wake_button*/) {}
+
+bool PowerService::is_ble_window_wake(WakeCause /*cause*/, const RtcAppState & /*state*/,
+                                      uint64_t /*now_retained_ms*/) {
+  return false;
+}
+
+bool PowerService::enter_light_sleep(uint32_t sleep_duration_ms) {
+  ++test_spy::light_sleep_count;
+  test_spy::light_sleep_duration_ms = sleep_duration_ms;
+  test_spy::light_sleep_prepared &=
+      !test_spy::shutdown_called && !test_spy::lp_feeder_started && !test_spy::pm_power_enabled &&
+      DisplayService::spy_deep_sleep_called &&
+      test_spy::ext_watchdog_feed_count >= test_spy::light_sleep_count;
+  return test_spy::light_sleep_callback ? test_spy::light_sleep_callback() : true;
+}
+
+WakeCause PowerService::get_wake_cause() { return test_spy::wake_cause; }
+
+bool PowerService::is_power_on_reset() { return test_spy::power_on_reset; }
 
 bool PowerService::is_fast_path_wake(WakeCause cause, const RtcAppState &state) {
   return cause == WakeCause::Timer && state.lock_state == LockState::Locked;
@@ -535,7 +642,10 @@ void PowerService::release_sleep_gpio_holds(int /*pin_pm_power*/) {}
 
 void PowerService::init_ext_watchdog() {}
 
-void PowerService::reset_ext_watchdog() {}
+void PowerService::reset_ext_watchdog() {
+  test_spy::ext_watchdog_fed = true;
+  ++test_spy::ext_watchdog_feed_count;
+}
 
 void PowerService::configure_wake_sources(uint32_t /*timer_ms*/) {}
 
@@ -558,16 +668,16 @@ bool BleService::init(const char * /*serial*/) {
   return true;
 }
 
-void BleService::deinit() {}
+void BleService::deinit() { ++test_spy::ble_deinit_count; }
 bool BleService::is_initialized() const { return false; }
-bool BleService::is_connected() const { return false; }
+bool BleService::is_connected() const { return test_spy::ble_connected; }
 bool BleService::is_authenticated() const { return false; }
 void BleService::notify_measures(const MeasuresAGo & /*m*/, const GpsData & /*gps*/,
                                  time_t /*ts*/) {}
 void BleService::update_status(const PowerSnapshot & /*power*/, const GpsData & /*gps*/,
-                               bool /*tracking*/, uint32_t /*session_id*/) {}
+                               uint32_t /*session_id*/, TrackingState /*state*/) {}
 void BleService::notify_charging_status(const PowerSnapshot & /*power*/, const GpsData & /*gps*/,
-                                        bool /*tracking*/, uint32_t /*session_id*/) {}
+                                        uint32_t /*session_id*/, TrackingState /*state*/) {}
 void BleService::notify_disconnect(BleDiscReason /*reason*/) {}
 void BleService::update_config(const GoSettings & /*settings*/) {}
 void BleService::notify_config(const GoSettings & /*prev*/, const GoSettings & /*cur*/) {}
@@ -607,7 +717,7 @@ size_t BleService::encode_measures(uint8_t * /*buf*/, size_t /*sz*/, const Measu
   return 0;
 }
 size_t BleService::encode_status(uint8_t * /*buf*/, size_t /*sz*/, const PowerSnapshot & /*p*/,
-                                 const GpsData & /*g*/, bool /*t*/, uint32_t /*s*/) {
+                                 const GpsData & /*g*/, uint32_t /*s*/, TrackingState /*state*/) {
   return 0;
 }
 size_t BleService::encode_config(uint8_t * /*buf*/, size_t /*sz*/, const GoSettings & /*s*/) {
@@ -687,7 +797,7 @@ void WifiService::_on_disconnected(WifiDisconnectReason /*r*/) {}
 void WifiService::_reset_deadline() {}
 void WifiService::_arm_deadline(uint32_t /*window_ms*/) {}
 void WifiService::_reset_online_latches() {}
-void WifiService::_post_wifi_disconnected(WifiDisconnectReason /*r*/) {}
+bool WifiService::_post_wifi_disconnected(WifiDisconnectReason /*r*/) { return true; }
 
 // ============================================================================
 // AgClient stubs
@@ -754,8 +864,12 @@ MeasuresAGo CloudService::_snapshot_copy() { return _latest_snapshot; }
 // go_app test target).
 // ============================================================================
 
-OtaService::OtaService(AgBleServer &server, PowerService &power, const Config &cfg)
-    : _server(server), _power(power), _config(cfg), _writer(), _ble_ota(_server, _writer) {}
+OtaService::OtaService(AgBleServer &server, PowerService & /*power*/, const Config &cfg)
+    : _server(server), _feed_watchdog([] {}), _config(cfg), _writer(), _ble_ota(_server, _writer) {}
+
+OtaService::OtaService(AgBleServer &server, std::function<void()> feed_watchdog, const Config &cfg)
+    : _server(server), _feed_watchdog(std::move(feed_watchdog)), _config(cfg), _writer(),
+      _ble_ota(_server, _writer) {}
 
 bool OtaService::setup_ble() { return true; }
 void OtaService::handle_disconnect() {}
@@ -781,7 +895,7 @@ DisplayValues UIManager::build_values(const BuildContext & /*ctx*/) const { retu
 void UIManager::set_screen(Screen /*screen*/) {}
 Screen UIManager::current_screen() const { return Screen::Home; }
 bool UIManager::is_on_menu_screen() const { return false; }
-void UIManager::show_snackbar(const char * /*text*/) {}
+void UIManager::show_snackbar(const char * /*text*/, bool /*persistent*/) {}
 void UIManager::clear_expired_snackbar(uint32_t /*now_ms*/) {}
 void UIManager::sync_settings(const GoSettings & /*settings*/) {}
 void UIManager::apply_to_settings(GoSettings & /*settings*/) const {}
@@ -804,6 +918,7 @@ Orchestrator::Orchestrator(RtosQueueHandle event_queue, const Services &services
     : _event_queue(event_queue), _svc(services), _settings(settings), _config_store(config_store),
       _serial(serial) {
   test_spy::orchestrator_event_queue = event_queue;
+  test_spy::orchestrator_ble_service = &services.ble_service;
   test_spy::orchestrator_local_api = &services.local_api;
   test_spy::orchestrator_local_api_system_info = services.local_api.get_system_info();
 }
@@ -812,6 +927,7 @@ void Orchestrator::init(WakeCause cause, const BootHandoff &handoff) {
   test_spy::orchestrator_init_called = true;
   test_spy::orchestrator_wake_cause = cause;
   test_spy::orchestrator_handoff = handoff;
+  test_spy::orchestrator_rtc_state = load_rtc_app_state();
 }
 
 void Orchestrator::run() { test_spy::orchestrator_run_called = true; }
@@ -860,7 +976,7 @@ bool StorageService::ensure_route_dir() const { return true; }
 
 // Orchestrator private stubs (never called in GoApp tests)
 void Orchestrator::dispatch(const Event & /*event*/) {}
-void Orchestrator::on_sensor_data(const MeasuresAGo & /*data*/) {}
+void Orchestrator::on_sensor_data(const MeasuresAGo & /*data*/, MeasurementOrigin /*origin*/) {}
 void Orchestrator::on_gps_fix(const GpsData & /*data*/) {}
 void Orchestrator::on_input(const InputEventData & /*input*/) {}
 void Orchestrator::on_co2_calibration_done(Co2CalibrationResult /*result*/) {}
@@ -887,7 +1003,7 @@ void Orchestrator::on_bms_timer() {}
 void Orchestrator::on_bms_status_timer() {}
 void Orchestrator::on_inactivity_timeout() {}
 void Orchestrator::reschedule_sensor_timer(const GoSettings & /*previous_settings*/) {}
-void Orchestrator::update_display() {}
+bool Orchestrator::update_display() { return true; }
 void Orchestrator::request_background_display_update(bool /*wait*/) {}
 BuildContext Orchestrator::build_context() const {
   static Measures dummy_measures{};
@@ -913,8 +1029,6 @@ LedService::~LedService() = default;
 bool LedService::init() { return true; }
 bool LedService::start() { return true; }
 
-void LedService::front_set_brightness(LedBrightness /*brightness*/) {}
-
 void LedService::back_solid(Rgb /*color*/) {}
 void LedService::back_blink(Rgb /*color*/, uint32_t /*period_ms*/) {}
 void LedService::back_breathe(Rgb /*color*/, uint32_t /*period_ms*/) {}
@@ -936,7 +1050,6 @@ void LedService::_enqueue(const Cmd & /*cmd*/) {}
 void LedService::_process_cmd(const Cmd & /*cmd*/, uint32_t /*now_ms*/) {}
 void LedService::_tick_back(uint32_t /*now_ms*/) {}
 void LedService::_tick_touch(uint32_t /*now_ms*/) {}
-void LedService::_render_front() {}
 void LedService::_render_back() {}
 void LedService::_render_touch() {}
 bool LedService::_is_back_static() const { return true; }
@@ -981,6 +1094,7 @@ bool BuzzerService::start() { return true; }
 
 void BuzzerService::play(const Note * /*notes*/, uint8_t /*count*/) {}
 void BuzzerService::beep(uint32_t /*freq_hz*/, uint32_t /*duration_ms*/) {}
+void BuzzerService::acknowledge_refresh() {}
 void BuzzerService::set_enabled(bool /*enabled*/) {}
 void BuzzerService::stop() {}
 bool BuzzerService::is_playing() const { return false; }

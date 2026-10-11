@@ -57,6 +57,7 @@ public:
   IMPLEMENT_MOCK1(set_charge_enable);
   IMPLEMENT_MOCK1(set_charge_current_ma);
   IMPLEMENT_MOCK1(set_watchdog_timeout_ms);
+  IMPLEMENT_MOCK1(set_adc_enabled);
 
 private:
   std::unique_ptr<trompeloeil::expectation> default_charge_enable;
@@ -374,6 +375,84 @@ TEST_CASE("set_bms: attaches charger after degraded construction", "[PowerServic
   CHECK(svc.reset_watchdog());
 }
 
+TEST_CASE("ble_window_timer_ms: wakes every period, folding a short tail",
+          "[PowerService][sleep]") {
+  CHECK(ble_window_timer_ms(57000) == BLE_WINDOW_PERIOD_MS);
+  CHECK(ble_window_timer_ms(BLE_WINDOW_PERIOD_MS + BLE_WINDOW_MIN_SLEEP_MS + 1) ==
+        BLE_WINDOW_PERIOD_MS);
+  // A tail shorter than BLE_WINDOW_MIN_SLEEP_MS joins the last segment.
+  CHECK(ble_window_timer_ms(BLE_WINDOW_PERIOD_MS + BLE_WINDOW_MIN_SLEEP_MS) ==
+        BLE_WINDOW_PERIOD_MS + BLE_WINDOW_MIN_SLEEP_MS);
+  CHECK(ble_window_timer_ms(4000) == 4000);
+  CHECK(ble_window_timer_ms(0) == 0);
+}
+
+namespace {
+/// Host RTOS whose retained clock the test sets.
+class RetainedClockRTOS : public RTOS {
+public:
+  void delay_ms_impl(uint32_t) override {}
+  uint64_t get_time_ms_impl() override { return 0; }
+  uint64_t get_retained_time_ms_impl() override { return retained_ms; }
+  void set_system_time_from_epoch_impl(int64_t) override {}
+  uint64_t retained_ms = 0;
+};
+} // namespace
+
+TEST_CASE("connect windows: a split sleep marks its timer wakes", "[PowerService][sleep]") {
+  RetainedClockRTOS clock;
+  RTOS::set_instance(&clock);
+  PowerService svc(nullptr, test_gpio_hal, DEFAULT_CONFIG);
+  RtcAppState state{};
+  state.mode = OperatingMode::Portable;
+  state.lock_state = LockState::Locked;
+
+  clock.retained_ms = 100000;
+  svc.enter_sleep(47000, /*ble_windows=*/true); // measurement due at 147000
+
+  CHECK(PowerService::is_ble_window_wake(WakeCause::Timer, state, 110000));
+  CHECK(PowerService::is_ble_window_wake(WakeCause::Timer, state, 144999));
+  // Within BLE_WINDOW_MIN_SLEEP_MS of the measurement: measure now.
+  CHECK_FALSE(PowerService::is_ble_window_wake(WakeCause::Timer, state, 145000));
+  CHECK_FALSE(PowerService::is_ble_window_wake(WakeCause::Timer, state, 150000));
+  CHECK_FALSE(PowerService::is_ble_window_wake(WakeCause::Button, state, 110000));
+  RtcAppState unlocked = state;
+  unlocked.lock_state = LockState::Unlocked;
+  CHECK_FALSE(PowerService::is_ble_window_wake(WakeCause::Timer, unlocked, 110000));
+  RtcAppState offline = state;
+  offline.mode = OperatingMode::Offline;
+  CHECK_FALSE(PowerService::is_ble_window_wake(WakeCause::Timer, offline, 110000));
+
+  // A sleep that is not split clears the due time.
+  svc.enter_sleep(47000);
+  CHECK_FALSE(PowerService::is_ble_window_wake(WakeCause::Timer, state, 110000));
+
+  RTOS::set_instance(nullptr);
+}
+
+TEST_CASE("enter_sleep: disables the BMS ADC before deep sleep", "[PowerService][sleep]") {
+  SECTION("ADC disabled on the attached BMS") {
+    MockBmsDevice mock_bms;
+    PowerService svc(&mock_bms, test_gpio_hal, DEFAULT_CONFIG);
+
+    REQUIRE_CALL(mock_bms, set_adc_enabled(false)).RETURN(true);
+    svc.enter_sleep(60000);
+  }
+
+  SECTION("ADC disable failure does not block sleep entry") {
+    MockBmsDevice mock_bms;
+    PowerService svc(&mock_bms, test_gpio_hal, DEFAULT_CONFIG);
+
+    REQUIRE_CALL(mock_bms, set_adc_enabled(false)).RETURN(false);
+    svc.enter_sleep(60000);
+  }
+
+  SECTION("no BMS attached — no crash") {
+    PowerService svc(nullptr, test_gpio_hal, DEFAULT_CONFIG);
+    svc.enter_sleep(60000);
+  }
+}
+
 // ============================================================================
 // TEST CASE 3 — poll_status (plain pass-through, no PMID sync)
 // ============================================================================
@@ -409,17 +488,75 @@ TEST_CASE("poll_status: charger status pass-through", "[PowerService][status]") 
 TEST_CASE("decide_sleep: sleep type and duration", "[PowerService][sleep]") {
   MockBmsDevice mock_bms;
 
-  SECTION("Non-Offline mode — None with zero duration") {
+  SECTION("Portable sleep enabled, no BLE link — Deep for the rest of the interval") {
+    PowerService svc(&mock_bms, test_gpio_hal, DEFAULT_CONFIG);
+
+    GoSettings settings{};
+    settings.measure_interval_seconds = 60;
+    settings.portable_sleep_enabled = true;
+
+    auto d = svc.decide_sleep(settings, LockState::Locked, OperatingMode::Portable, 3000, false);
+    CHECK(d.type == PowerService::SleepType::Deep);
+    CHECK(d.duration_ms == 57000);
+    CHECK(d.ble_windows); // stays connectable between measurements
+  }
+
+  SECTION("Portable sleep enabled but BLE link active — None") {
+    PowerService svc(&mock_bms, test_gpio_hal, DEFAULT_CONFIG);
+
+    GoSettings settings{};
+    settings.measure_interval_seconds = 60;
+    settings.portable_sleep_enabled = true;
+
+    auto d = svc.decide_sleep(settings, LockState::Locked, OperatingMode::Portable, 0, true);
+    CHECK(d.type == PowerService::SleepType::None);
+    CHECK(d.duration_ms == 0);
+  }
+
+  SECTION("Portable sleep enabled but Unlocked — None") {
+    PowerService svc(&mock_bms, test_gpio_hal, DEFAULT_CONFIG);
+
+    GoSettings settings{};
+    settings.measure_interval_seconds = 60;
+    settings.portable_sleep_enabled = true;
+
+    auto d = svc.decide_sleep(settings, LockState::Unlocked, OperatingMode::Portable, 0, false);
+    CHECK(d.type == PowerService::SleepType::None);
+  }
+
+  SECTION("Portable sleep setting never applies to Stationary") {
+    PowerService svc(&mock_bms, test_gpio_hal, DEFAULT_CONFIG);
+
+    GoSettings settings{};
+    settings.measure_interval_seconds = 60;
+    settings.portable_sleep_enabled = true;
+
+    auto d = svc.decide_sleep(settings, LockState::Locked, OperatingMode::Stationary, 0, false);
+    CHECK(d.type == PowerService::SleepType::None);
+  }
+
+  SECTION("Offline ignores the BLE link flag") {
     PowerService svc(&mock_bms, test_gpio_hal, DEFAULT_CONFIG);
 
     GoSettings settings{};
     settings.measure_interval_seconds = 60;
 
-    auto d = svc.decide_sleep(settings, LockState::Locked, OperatingMode::Portable, 0);
+    auto d = svc.decide_sleep(settings, LockState::Locked, OperatingMode::Offline, 0, true);
+    CHECK(d.type == PowerService::SleepType::Deep);
+    CHECK_FALSE(d.ble_windows); // Offline has no BLE
+  }
+
+  SECTION("Non-Offline mode (Portable sleep disabled) — None with zero duration") {
+    PowerService svc(&mock_bms, test_gpio_hal, DEFAULT_CONFIG);
+
+    GoSettings settings{};
+    settings.measure_interval_seconds = 60;
+
+    auto d = svc.decide_sleep(settings, LockState::Locked, OperatingMode::Portable, 0, false);
     CHECK(d.type == PowerService::SleepType::None);
     CHECK(d.duration_ms == 0);
 
-    d = svc.decide_sleep(settings, LockState::Locked, OperatingMode::Stationary, 0);
+    d = svc.decide_sleep(settings, LockState::Locked, OperatingMode::Stationary, 0, false);
     CHECK(d.type == PowerService::SleepType::None);
     CHECK(d.duration_ms == 0);
   }
@@ -430,7 +567,7 @@ TEST_CASE("decide_sleep: sleep type and duration", "[PowerService][sleep]") {
     GoSettings settings{};
     settings.measure_interval_seconds = 60;
 
-    auto d = svc.decide_sleep(settings, LockState::Unlocked, OperatingMode::Offline, 0);
+    auto d = svc.decide_sleep(settings, LockState::Unlocked, OperatingMode::Offline, 0, false);
     CHECK(d.type == PowerService::SleepType::None);
     CHECK(d.duration_ms == 0);
   }
@@ -441,7 +578,7 @@ TEST_CASE("decide_sleep: sleep type and duration", "[PowerService][sleep]") {
     GoSettings settings{};
     settings.measure_interval_seconds = 60;
 
-    auto d = svc.decide_sleep(settings, LockState::Locked, OperatingMode::Offline, 3000);
+    auto d = svc.decide_sleep(settings, LockState::Locked, OperatingMode::Offline, 3000, false);
     CHECK(d.type == PowerService::SleepType::Deep);
     CHECK(d.duration_ms == 57000);
   }
@@ -452,7 +589,7 @@ TEST_CASE("decide_sleep: sleep type and duration", "[PowerService][sleep]") {
     GoSettings settings{};
     settings.measure_interval_seconds = 10;
 
-    auto d = svc.decide_sleep(settings, LockState::Locked, OperatingMode::Offline, 7000);
+    auto d = svc.decide_sleep(settings, LockState::Locked, OperatingMode::Offline, 7000, false);
     CHECK(d.type == PowerService::SleepType::None);
     CHECK(d.duration_ms == 0);
   }
@@ -463,7 +600,7 @@ TEST_CASE("decide_sleep: sleep type and duration", "[PowerService][sleep]") {
     GoSettings settings{};
     settings.measure_interval_seconds = 3;
 
-    auto d = svc.decide_sleep(settings, LockState::Locked, OperatingMode::Offline, 1000);
+    auto d = svc.decide_sleep(settings, LockState::Locked, OperatingMode::Offline, 1000, false);
     CHECK(d.type == PowerService::SleepType::None);
     CHECK(d.duration_ms == 0);
   }
@@ -476,7 +613,7 @@ TEST_CASE("decide_sleep: sleep type and duration", "[PowerService][sleep]") {
     GoSettings settings{};
     settings.measure_interval_seconds = 3; // 3000 ms >= 2000
 
-    auto d = svc.decide_sleep(settings, LockState::Locked, OperatingMode::Offline, 0);
+    auto d = svc.decide_sleep(settings, LockState::Locked, OperatingMode::Offline, 0, false);
     CHECK(d.type == PowerService::SleepType::Deep);
     CHECK(d.duration_ms == 3000);
   }
@@ -488,12 +625,12 @@ TEST_CASE("decide_sleep: sleep type and duration", "[PowerService][sleep]") {
     settings.measure_interval_seconds = 10; // interval 10000 ms
 
     // 0 awake: 10000 ms >= 5000 -> Deep
-    auto d = svc.decide_sleep(settings, LockState::Locked, OperatingMode::Offline, 0);
+    auto d = svc.decide_sleep(settings, LockState::Locked, OperatingMode::Offline, 0, false);
     CHECK(d.type == PowerService::SleepType::Deep);
     CHECK(d.duration_ms == 10000);
 
     // 6000 awake: 4000 ms < 5000 -> None (stay awake)
-    d = svc.decide_sleep(settings, LockState::Locked, OperatingMode::Offline, 6000);
+    d = svc.decide_sleep(settings, LockState::Locked, OperatingMode::Offline, 6000, false);
     CHECK(d.type == PowerService::SleepType::None);
     CHECK(d.duration_ms == 0);
   }
@@ -504,7 +641,7 @@ TEST_CASE("decide_sleep: sleep type and duration", "[PowerService][sleep]") {
     GoSettings settings{};
     settings.measure_interval_seconds = 3;
 
-    auto d = svc.decide_sleep(settings, LockState::Locked, OperatingMode::Offline, 5000);
+    auto d = svc.decide_sleep(settings, LockState::Locked, OperatingMode::Offline, 5000, false);
     CHECK(d.type == PowerService::SleepType::None);
     CHECK(d.duration_ms == 0);
   }
@@ -548,51 +685,138 @@ TEST_CASE("is_fast_path_wake: fast-path boot predicate", "[PowerService][boot]")
 // TEST CASE 5 — save_state / load_state (RTC_DATA_ATTR is a plain static)
 // ============================================================================
 
+TEST_CASE("reboot: waits for Power release without changing RTC state", "[PowerService][rtc]") {
+  ScopedMockRTOS rtos;
+  MockBmsDevice bms;
+  static int button_reads;
+  button_reads = 0;
+  auto gpio = test_gpio_hal;
+  gpio.get_level = [](int) { return ++button_reads < 3 ? 0 : 1; };
+  PowerService svc(&bms, gpio, DEFAULT_CONFIG);
+  RtcAppState state{};
+  state.set_flag(RtcAppFlag::ChargingOnlyRequested, true);
+  svc.save_state(state);
+  FORBID_CALL(bms, read_status(trompeloeil::_));
+  REQUIRE_CALL(rtos.mock, delay_ms_impl(50)).TIMES(2);
+  svc.reboot();
+  CHECK(button_reads == 3);
+  CHECK(svc.load_state().has_flag(RtcAppFlag::ChargingOnlyRequested));
+}
+
+TEST_CASE("RtcAppState: defaults and independent flag updates", "[PowerService][rtc]") {
+  CHECK(static_cast<uint32_t>(RtcAppFlag::GpsEnabled) == 0x01);
+  CHECK(static_cast<uint32_t>(RtcAppFlag::SensorsWarm) == 0x02);
+  CHECK(static_cast<uint32_t>(RtcAppFlag::ChargingOnlyRequested) == 0x04);
+
+  const RtcAppState defaults{};
+  CHECK(defaults.mode == OperatingMode::Portable);
+  CHECK(defaults.behavior == Behavior::Idle);
+  CHECK(defaults.lock_state == LockState::Locked);
+  CHECK(defaults.tracking_state == TrackingState::Idle);
+  CHECK(defaults.tracking_session_id == 0);
+  CHECK(defaults.flags == static_cast<uint32_t>(RtcAppFlag::GpsEnabled));
+  CHECK(defaults.has_flag(RtcAppFlag::GpsEnabled));
+  CHECK_FALSE(defaults.has_flag(RtcAppFlag::SensorsWarm));
+  CHECK_FALSE(defaults.has_flag(RtcAppFlag::ChargingOnlyRequested));
+
+  constexpr uint32_t ALL_BITS = ~uint32_t{0};
+  for (const auto flag :
+       {RtcAppFlag::GpsEnabled, RtcAppFlag::SensorsWarm, RtcAppFlag::ChargingOnlyRequested}) {
+    const auto mask = static_cast<uint32_t>(flag);
+    CAPTURE(mask);
+    RtcAppState state{};
+    state.flags = ALL_BITS;
+    state.set_flag(flag, false);
+    state.set_flag(flag, false);
+    CHECK_FALSE(state.has_flag(flag));
+    CHECK(state.flags == (ALL_BITS & ~mask));
+    state.set_flag(flag, true);
+    state.set_flag(flag, true);
+    CHECK(state.has_flag(flag));
+    CHECK(state.flags == ALL_BITS);
+
+    state.flags = 0;
+    state.set_flag(flag, true);
+    CHECK(state.has_flag(flag));
+    CHECK(state.flags == mask);
+    state.set_flag(flag, false);
+    CHECK(state.flags == 0);
+  }
+}
+
 TEST_CASE("save_state / load_state: RTC state round-trip", "[PowerService][rtc]") {
   MockBmsDevice mock_bms;
   PowerService svc(&mock_bms, test_gpio_hal, DEFAULT_CONFIG);
 
-  SECTION("load before any save — returns default RtcAppState") {
-    // Note: The static s_rtc_state_valid may carry state from previous
-    // sections.  This test relies on the FIRST test execution order; however,
-    // the default-constructed assertion still verifies the fallback path if
-    // no state has been saved (or if the test runner starts fresh).
-    //
-    // For robustness, we create a second PowerService instance that shares
-    // the same static variable — this is inherent to the file-scope design.
-    // We test the contract: if nothing was saved, defaults are returned.
+  SECTION("invalid RTC storage returns defaults through both loaders") {
+    RtcAppState stale{};
+    stale.mode = OperatingMode::Offline;
+    stale.behavior = Behavior::Tracking;
+    stale.lock_state = LockState::Unlocked;
+    stale.tracking_state = TrackingState::Recording;
+    stale.tracking_session_id = 42731;
+    stale.flags = ~uint32_t{0};
+    stale.tracking_timing = {100, 20, 130, 140};
+    svc.save_state(stale);
+    invalidate_rtc_app_state_for_test();
 
-    // Intentionally do not call save_state().  If s_rtc_state_valid is false
-    // (first run), load_state() returns defaults.  If prior sections already
-    // saved, we skip this assertion and verify round-trip instead.
+    for (const auto loaded : {svc.load_state(), load_rtc_app_state()}) {
+      CHECK(loaded.mode == OperatingMode::Portable);
+      CHECK(loaded.behavior == Behavior::Idle);
+      CHECK(loaded.lock_state == LockState::Locked);
+      CHECK(loaded.tracking_state == TrackingState::Idle);
+      CHECK(loaded.tracking_session_id == 0);
+      CHECK(loaded.flags == static_cast<uint32_t>(RtcAppFlag::GpsEnabled));
+      CHECK(loaded.tracking_timing.session_started_s == TRACKING_TIME_INVALID_S);
+      CHECK(loaded.tracking_timing.recording_accumulated_s == TRACKING_TIME_INVALID_S);
+      CHECK(loaded.tracking_timing.recording_started_s == TRACKING_TIME_INVALID_S);
+      CHECK(loaded.tracking_timing.last_record_s == TRACKING_TIME_INVALID_S);
+    }
   }
 
-  SECTION("save then load — round-trip fidelity") {
-    RtcAppState saved{};
-    saved.mode = OperatingMode::Portable;
-    saved.behavior = Behavior::Tracking;
-    saved.lock_state = LockState::Unlocked;
-    saved.gps_enabled = false;
-    saved.tracking_active = true;
-    saved.tracking_session_id = 42731;
-    saved.sensors_warm = true;
+  SECTION("all flag combinations and reserved bits survive both RTC loaders") {
+    constexpr uint32_t FLAG_COMBINATION_COUNT = 8;
+    constexpr uint32_t RESERVED_BITS = ~uint32_t{0x07};
+    for (const uint32_t reserved : {uint32_t{0}, RESERVED_BITS}) {
+      for (uint32_t combination = 0; combination < FLAG_COMBINATION_COUNT; ++combination) {
+        CAPTURE(combination, reserved);
+        RtcAppState saved{};
+        saved.mode = OperatingMode::Stationary;
+        saved.behavior = Behavior::Tracking;
+        saved.lock_state = LockState::Unlocked;
+        saved.tracking_state = TrackingState::Recording;
+        saved.tracking_session_id = 42731;
+        saved.flags = reserved;
+        saved.tracking_timing = {100, 20, 130, 140};
+        saved.set_flag(RtcAppFlag::GpsEnabled, (combination & 0x01) != 0);
+        saved.set_flag(RtcAppFlag::SensorsWarm, (combination & 0x02) != 0);
+        saved.set_flag(RtcAppFlag::ChargingOnlyRequested, (combination & 0x04) != 0);
+        svc.save_state(saved);
 
-    svc.save_state(saved);
-    const RtcAppState loaded = svc.load_state();
-
-    CHECK(loaded.mode == OperatingMode::Portable);
-    CHECK(loaded.behavior == Behavior::Tracking);
-    CHECK(loaded.lock_state == LockState::Unlocked);
-    CHECK_FALSE(loaded.gps_enabled);
-    CHECK(loaded.tracking_active);
-    CHECK(loaded.tracking_session_id == 42731);
-    CHECK(loaded.sensors_warm);
+        for (const auto loaded : {svc.load_state(), load_rtc_app_state()}) {
+          CHECK(loaded.mode == saved.mode);
+          CHECK(loaded.behavior == saved.behavior);
+          CHECK(loaded.lock_state == saved.lock_state);
+          CHECK(loaded.tracking_state == saved.tracking_state);
+          CHECK(loaded.tracking_session_id == saved.tracking_session_id);
+          CHECK(loaded.tracking_timing.session_started_s == 100);
+          CHECK(loaded.tracking_timing.recording_accumulated_s == 20);
+          CHECK(loaded.tracking_timing.recording_started_s == 130);
+          CHECK(loaded.tracking_timing.last_record_s == 140);
+          CHECK(loaded.flags == (reserved | combination));
+          CHECK(loaded.has_flag(RtcAppFlag::GpsEnabled) == ((combination & 0x01) != 0));
+          CHECK(loaded.has_flag(RtcAppFlag::SensorsWarm) == ((combination & 0x02) != 0));
+          CHECK(loaded.has_flag(RtcAppFlag::ChargingOnlyRequested) == ((combination & 0x04) != 0));
+        }
+      }
+    }
   }
 
   SECTION("overwrite with new state — load returns latest") {
     RtcAppState first{};
     first.mode = OperatingMode::Stationary;
     first.tracking_session_id = 11111;
+    first.flags = ~uint32_t{0};
     svc.save_state(first);
 
     RtcAppState second{};
@@ -604,6 +828,8 @@ TEST_CASE("save_state / load_state: RTC state round-trip", "[PowerService][rtc]"
 
     CHECK(loaded.mode == OperatingMode::Offline);
     CHECK(loaded.tracking_session_id == 99999);
+    CHECK(loaded.flags == second.flags);
+    CHECK(load_rtc_app_state().flags == second.flags);
   }
 
   SECTION("sensors_warm defaults to false") {
@@ -612,7 +838,23 @@ TEST_CASE("save_state / load_state: RTC state round-trip", "[PowerService][rtc]"
     svc.save_state(saved);
 
     const RtcAppState loaded = svc.load_state();
-    CHECK_FALSE(loaded.sensors_warm);
+    CHECK_FALSE(loaded.has_flag(RtcAppFlag::SensorsWarm));
+  }
+
+  SECTION("paused session survives RTC round-trip") {
+    RtcAppState saved{};
+    saved.tracking_state = TrackingState::Paused;
+    saved.tracking_session_id = 42731;
+    saved.tracking_timing = {100, 30, TRACKING_TIME_INVALID_S, 120};
+    svc.save_state(saved);
+    const auto loaded = svc.load_state();
+    CHECK(loaded.tracking_state == TrackingState::Paused);
+    CHECK(loaded.tracking_session_id == 42731);
+    CHECK(loaded.tracking_timing.session_started_s == 100);
+    CHECK(loaded.tracking_timing.recording_accumulated_s == 30);
+    CHECK(loaded.tracking_timing.recording_started_s == TRACKING_TIME_INVALID_S);
+    CHECK(loaded.tracking_timing.last_record_s == 120);
+    CHECK(load_rtc_app_state().tracking_timing.recording_accumulated_s == 30);
   }
 }
 

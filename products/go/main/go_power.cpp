@@ -31,7 +31,9 @@
 
 #ifndef TEST_HOST
 #include "driver/gpio.h"
+#include "driver/rtc_io.h"
 #include "esp_sleep.h"
+#include "esp_system.h"
 #endif
 
 #include "go_power.h"
@@ -106,6 +108,9 @@ static char *fmt_fg_flags(uint16_t flags, char *buf, size_t len) {
 
 RTC_DATA_ATTR static RtcAppState s_rtc_state;
 RTC_DATA_ATTR static bool s_rtc_state_valid = false;
+// Retained-clock time the next measurement is due during a Portable Sleep
+// cycle split into connect windows; 0 when the current sleep is not split.
+RTC_DATA_ATTR static uint64_t s_rtc_measure_due_ms = 0;
 
 // ---------------------------------------------------------------------------
 // Construction
@@ -530,6 +535,22 @@ bool PowerService::set_watchdog_timeout_ms(uint32_t timeout_ms) {
   return _bms != nullptr && _bms->set_watchdog_timeout_ms(timeout_ms);
 }
 
+void PowerService::reboot() {
+  constexpr uint32_t BUTTON_RELEASE_POLL_MS = 50;
+  while (_config.pin_wake_button_power >= 0 &&
+         _gpio.get_level(_config.pin_wake_button_power) == 0) {
+    reset_ext_watchdog();
+    RTOS::delay_ms(BUTTON_RELEASE_POLL_MS);
+  }
+  reset_ext_watchdog();
+#ifndef TEST_HOST
+  constexpr uint64_t REBOOT_DELAY_US = 1000;
+  esp_sleep_disable_wakeup_source(ESP_SLEEP_WAKEUP_ALL);
+  esp_sleep_enable_timer_wakeup(REBOOT_DELAY_US);
+  esp_deep_sleep_start();
+#endif
+}
+
 void PowerService::shutdown() {
 #ifndef TEST_HOST
   AG_LOGI(TAG, "shutdown: entering BMS ship mode (QoN)");
@@ -540,6 +561,10 @@ void PowerService::shutdown() {
   // If it does (failed or unexpected return), fall back to deep sleep with
   // GPIO wake sources so the user can press a button to try powering on again.
   // No timer is configured — this is a shutdown, not a scheduled wake cycle.
+  // Stop the charger's continuous ADC first; init() re-enables it on boot.
+  if (_bms != nullptr && !_bms->set_adc_enabled(false)) {
+    AG_LOGW(TAG, "shutdown: BMS ADC disable failed or unsupported");
+  }
   uint64_t wake_mask = 0;
   if (_config.pin_wake_button_power >= 0) {
     wake_mask |= 1ULL << _config.pin_wake_button_power;
@@ -552,6 +577,35 @@ void PowerService::shutdown() {
   }
   esp_deep_sleep_start();
 #endif
+}
+
+bool PowerService::enter_light_sleep(uint32_t sleep_duration_ms) {
+  bool button_wake = false;
+#ifndef TEST_HOST
+  configure_wake_sources(sleep_duration_ms);
+  const esp_err_t err = esp_light_sleep_start();
+  button_wake = err == ESP_OK && esp_sleep_get_wakeup_cause() == ESP_SLEEP_WAKEUP_EXT1;
+
+  // Do not leave a polling timer armed for a later ship-mode/deep-sleep entry.
+  esp_sleep_disable_wakeup_source(ESP_SLEEP_WAKEUP_TIMER);
+  esp_sleep_disable_wakeup_source(ESP_SLEEP_WAKEUP_EXT1);
+  // EXT1 leaves its wake pins held in RTC mode; restore digital button reads.
+  const int button_pins[] = {_config.pin_wake_button_power, _config.pin_wake_button_boot};
+  for (int pin : button_pins) {
+    if (pin >= 0) {
+      rtc_gpio_hold_dis(static_cast<gpio_num_t>(pin));
+      rtc_gpio_deinit(static_cast<gpio_num_t>(pin));
+    }
+  }
+  if (err != ESP_OK) {
+    AG_LOGW(TAG, "light sleep failed (%s); delaying before retry", esp_err_to_name(err));
+    RTOS::delay_ms(sleep_duration_ms);
+  }
+#else
+  RTOS::delay_ms(sleep_duration_ms);
+#endif
+  const int button_pin = _config.pin_wake_button_power;
+  return button_wake || (button_pin >= 0 && _gpio.get_level(button_pin) == 0);
 }
 
 // ---------------------------------------------------------------------------
@@ -585,7 +639,7 @@ void PowerService::save_state(const RtcAppState &state) {
 
 RtcAppState PowerService::load_state() const {
   if (!s_rtc_state_valid) {
-    // Return defaults: Offline mode, Idle behavior, Locked, GPS on.
+    // Return defaults: Portable mode, Idle behavior, Locked, GPS on.
     return RtcAppState{};
   }
   RtcAppState out{};
@@ -599,9 +653,15 @@ RtcAppState PowerService::load_state() const {
 
 PowerService::SleepDecision PowerService::decide_sleep(const GoSettings &settings,
                                                        LockState lock_state, OperatingMode mode,
-                                                       uint32_t awake_ms) const {
-  // Only Offline mode enters sleep; Portable and Stationary stay awake.
-  if (mode != OperatingMode::Offline) {
+                                                       uint32_t awake_ms,
+                                                       bool ble_link_active) const {
+  // Offline always sleeps. Portable sleeps only when the user opted in and no
+  // phone is connected, because deep sleep tears down BLE. Stationary never
+  // sleeps.
+  const bool mode_allows_sleep =
+      mode == OperatingMode::Offline ||
+      (mode == OperatingMode::Portable && settings.portable_sleep_enabled && !ble_link_active);
+  if (!mode_allows_sleep) {
     return {SleepType::None, 0};
   }
 
@@ -615,7 +675,7 @@ PowerService::SleepDecision PowerService::decide_sleep(const GoSettings &setting
   uint32_t sleep_ms = (awake_ms < interval_ms) ? (interval_ms - awake_ms) : 0;
 
   if (sleep_ms >= static_cast<uint32_t>(_config.deep_sleep_threshold_ms)) {
-    return {SleepType::Deep, sleep_ms};
+    return {SleepType::Deep, sleep_ms, mode == OperatingMode::Portable};
   }
   // Interval too short: deep sleep overhead (~3–4 s reboot) exceeds the
   // sleep duration.  Stay awake and let the main loop run normally.
@@ -651,20 +711,63 @@ void PowerService::set_pm_power(bool on) {
 // Sleep entry — platform-specific, guarded by #ifndef TEST_HOST
 // ---------------------------------------------------------------------------
 
-void PowerService::enter_sleep(uint32_t sleep_duration_ms) {
+uint32_t ble_window_timer_ms(uint32_t remaining_ms) {
+  if (remaining_ms <= BLE_WINDOW_PERIOD_MS + BLE_WINDOW_MIN_SLEEP_MS) {
+    return remaining_ms;
+  }
+  return BLE_WINDOW_PERIOD_MS;
+}
+
+void PowerService::enter_sleep(uint32_t sleep_duration_ms, bool ble_windows) {
+  // Stop the charger's continuous ADC conversion: nothing reads telemetry
+  // while the CPU sleeps. BQ25629 init() re-enables it on the next boot.
+  // A failure only costs sleep current, so log it and keep going.
+  if (_bms != nullptr && !_bms->set_adc_enabled(false)) {
+    AG_LOGW(TAG, "enter_sleep: BMS ADC disable failed or unsupported");
+  }
+
+  // Connect-window wakes find the measurement due time here.
+  s_rtc_measure_due_ms = ble_windows ? RTOS::get_retained_time_ms() + sleep_duration_ms : 0;
+  const uint32_t timer_ms =
+      ble_windows ? ble_window_timer_ms(sleep_duration_ms) : sleep_duration_ms;
+
 #ifndef TEST_HOST
   // Hold PM sensor power GPIO during short sleeps so the sensor stays warm
-  // and the next fast-path boot can skip the 10 s warmup.
+  // and the next fast-path boot can skip the 10 s warmup. The hold follows
+  // the time to the next measurement, not the first connect-window timer.
   if (should_hold_pm_sensor(sleep_duration_ms)) {
     auto pin = static_cast<gpio_num_t>(_config.pin_pm_power);
     gpio_hold_en(pin);
     AG_LOGI(TAG, "enter_sleep: holding PM power GPIO %d for warm wake", _config.pin_pm_power);
   }
 
-  AG_LOGI(TAG, "enter_sleep: entering deep sleep for %" PRIu32 " ms", sleep_duration_ms);
-  configure_wake_sources(sleep_duration_ms);
+  AG_LOGI(TAG, "enter_sleep: entering deep sleep for %" PRIu32 " ms (timer %" PRIu32 " ms)",
+          sleep_duration_ms, timer_ms);
+  configure_wake_sources(timer_ms);
   esp_deep_sleep_start();
   // Does not return — CPU reboots on wake.
+#else
+  (void)timer_ms;
+#endif
+}
+
+// static
+void PowerService::resume_ble_window_sleep(int pin_wake_button) {
+  const uint64_t now_ms = RTOS::get_retained_time_ms();
+  const uint32_t remaining_ms =
+      s_rtc_measure_due_ms > now_ms ? static_cast<uint32_t>(s_rtc_measure_due_ms - now_ms) : 0;
+  const uint32_t timer_ms = ble_window_timer_ms(remaining_ms);
+#ifndef TEST_HOST
+  AG_LOGI(TAG, "connect window: sleeping %" PRIu32 " ms (measurement in %" PRIu32 " ms)", timer_ms,
+          remaining_ms);
+  esp_sleep_enable_timer_wakeup(static_cast<uint64_t>(timer_ms > 0 ? timer_ms : 1) * 1000ULL);
+  if (pin_wake_button >= 0) {
+    esp_sleep_enable_ext1_wakeup(1ULL << pin_wake_button, ESP_EXT1_WAKEUP_ANY_LOW);
+  }
+  esp_deep_sleep_start();
+#else
+  (void)timer_ms;
+  (void)pin_wake_button;
 #endif
 }
 
@@ -677,10 +780,9 @@ void PowerService::configure_wake_sources(uint32_t timer_ms) {
   // Timer wake: convert milliseconds to microseconds for the ESP-IDF API.
   esp_sleep_enable_timer_wakeup(static_cast<uint64_t>(timer_ms) * 1000ULL);
 
-  // GPIO wake: both buttons use EXT1 which supports multiple GPIOs in a
-  // single bitmask.  The target (ESP32-C5) does not have EXT0; EXT1 is the
-  // correct deep-sleep GPIO wake source.  Buttons are active-low, so wake
-  // fires when ANY selected GPIO is pulled low.
+  // GPIO wake: EXT1 supports both buttons in one mask for light and deep sleep.
+  // The target (ESP32-C5) has no EXT0. Active-low buttons wake the CPU when
+  // ANY selected GPIO is pulled low.
   uint64_t wake_mask = 0;
   if (_config.pin_wake_button_power >= 0) {
     wake_mask |= 1ULL << _config.pin_wake_button_power;
@@ -697,6 +799,15 @@ void PowerService::configure_wake_sources(uint32_t timer_ms) {
 // ---------------------------------------------------------------------------
 // Boot path — static helpers
 // ---------------------------------------------------------------------------
+
+// static
+bool PowerService::is_power_on_reset() {
+#ifndef TEST_HOST
+  return esp_reset_reason() == ESP_RST_POWERON;
+#else
+  return false;
+#endif
+}
 
 // static
 WakeCause PowerService::get_wake_cause() {
@@ -724,6 +835,13 @@ bool PowerService::is_fast_path_wake(WakeCause cause, const RtcAppState &state) 
 }
 
 // static
+bool PowerService::is_ble_window_wake(WakeCause cause, const RtcAppState &state,
+                                      uint64_t now_retained_ms) {
+  return is_fast_path_wake(cause, state) && state.mode == OperatingMode::Portable &&
+         s_rtc_measure_due_ms > now_retained_ms + BLE_WINDOW_MIN_SLEEP_MS;
+}
+
+// static
 void PowerService::release_sleep_gpio_holds(int pin_pm_power) {
 #ifndef TEST_HOST
   if (pin_pm_power >= 0) {
@@ -746,3 +864,7 @@ RtcAppState load_rtc_app_state() {
   memcpy(&out, &s_rtc_state, sizeof(RtcAppState));
   return out;
 }
+
+#ifdef TEST_HOST
+void invalidate_rtc_app_state_for_test() { s_rtc_state_valid = false; }
+#endif

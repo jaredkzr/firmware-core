@@ -13,6 +13,8 @@ inline constexpr size_t RENDER_BYTES = ROW_BYTES * RENDER_ROWS;
 inline constexpr size_t PHYSICAL_BYTES = ROW_BYTES * PHYSICAL_ROWS;
 inline constexpr uint16_t BODY_Y = 18;
 inline constexpr uint16_t BODY_HEIGHT = 232;
+/// Status-bar rows (y=0..17) that a body-only partial leaves untouched.
+inline constexpr size_t HEADER_BYTES = static_cast<size_t>(BODY_Y) * ROW_BYTES;
 
 struct PartialRegion {
   uint16_t y;
@@ -33,6 +35,7 @@ static_assert(BODY_Y + BODY_HEIGHT == PHYSICAL_ROWS);
 static_assert(partial_region(false).byte_offset + partial_region(false).byte_count ==
               PHYSICAL_BYTES);
 static_assert(partial_region(true).byte_count == PHYSICAL_BYTES);
+static_assert(partial_region(false).byte_offset == HEADER_BYTES);
 
 } // namespace go_display_geometry
 

@@ -67,9 +67,17 @@ Optional capabilities follow the same pattern as `PMSensor`:
 | `supports_noise()` | `false` | `true` |
 | `supports_calibration()` | `false` | `true` |
 | `calibrate(mask)` | no-op `false` | writes `REG_CALIBRATION_ACTIVATE` |
+| `deep_sleep()` | no-op `true` | sets `MAIN_CONTROL` DSLEEP and clears INT |
 
 `out.noise` in `TouchData` is only meaningful when
 `supports_noise() == true`.
+
+### Deep Sleep
+
+`deep_sleep()` stops all sensing before ESP deep sleep; the chip stays
+powered and I2C-accessible. The DSLEEP bit survives ESP deep sleep, so
+`CAP1203::init()` reads `MAIN_CONTROL` and clears DSLEEP and STBY before it
+applies the configuration. Touch input stays dead until `init()` runs.
 
 ## Usage
 
@@ -106,7 +114,7 @@ behavior is exercised at the product level via a mocked
 
 | Constant | Address | Description |
 |---|---|---|
-| `REG_MAIN_CONTROL` | `0x00` | INT bit (bit 0) |
+| `REG_MAIN_CONTROL` | `0x00` | STBY (bit 5), DSLEEP (bit 4), INT (bit 0) |
 | `REG_GENERAL_STATUS` | `0x02` | Touch event latch |
 | `REG_SENSOR_INPUT_STATUS` | `0x03` | Per-channel touch flags |
 | `REG_NOISE_FLAG_STATUS` | `0x0A` | Per-channel noise flags |

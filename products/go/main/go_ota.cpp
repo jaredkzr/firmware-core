@@ -11,6 +11,8 @@
 
 #include "ag_log.h"
 #include "go_power.h"
+
+#include <utility>
 #include "hal/ble_server.h"
 #include "services/ota_updater.h"
 #include "backends/wifi/wifi_http_ota_source.h"
@@ -18,7 +20,11 @@
 static constexpr const char *TAG = "OtaService";
 
 OtaService::OtaService(AgBleServer &server, PowerService &power, const Config &cfg)
-    : _server(server), _power(power), _config(cfg), _writer(), _ble_ota(_server, _writer) {
+    : OtaService(server, [&power]() { power.reset_ext_watchdog(); }, cfg) {}
+
+OtaService::OtaService(AgBleServer &server, std::function<void()> feed_watchdog, const Config &cfg)
+    : _server(server), _feed_watchdog(std::move(feed_watchdog)), _config(cfg), _writer(),
+      _ble_ota(_server, _writer) {
   // Thin forwarder; logic lives in the named handler.
   _ble_ota.set_on_progress([this](const OtaProgress &p) { _on_ble_progress(p); });
 }
@@ -57,7 +63,7 @@ void OtaService::_on_ble_progress(const OtaProgress &progress) {
   const bool terminal = progress.state == OtaState::Done || progress.state == OtaState::Failed ||
                         progress.state == OtaState::Skipped;
   if (!terminal) {
-    _power.reset_ext_watchdog();
+    _feed_watchdog();
   }
 }
 
@@ -65,7 +71,7 @@ void OtaService::_on_wifi_progress(const OtaProgress &progress) {
   const bool terminal = progress.state == OtaState::Done || progress.state == OtaState::Failed ||
                         progress.state == OtaState::Skipped;
   if (!terminal) {
-    _power.reset_ext_watchdog(); // non-terminal ticks only
+    _feed_watchdog(); // non-terminal ticks only
   }
 
   // Lazy commit: only once an image is actually being pulled.

@@ -156,6 +156,22 @@ inline bool is_bms_charging(BmsChargingState state) {
 // PowerService
 // ---------------------------------------------------------------------------
 
+/// Portable Sleep keeps the device connectable: the deep sleep between two
+/// measurements is split into timer wakes at most this far apart, and each
+/// one advertises over BLE for BLE_WINDOW_ADVERTISE_MS.
+inline constexpr uint32_t BLE_WINDOW_PERIOD_MS = 10000;
+/// How long a connect-window wake advertises before going back to sleep.
+inline constexpr uint32_t BLE_WINDOW_ADVERTISE_MS = 1000;
+/// A sleep segment shorter than this is merged into the previous one, so the
+/// final wake before a measurement is the measurement wake itself.
+inline constexpr uint32_t BLE_WINDOW_MIN_SLEEP_MS = 2000;
+
+/// Timer to arm for the next sleep segment when @p remaining_ms are left until
+/// the measurement is due: one window period, or all of it when what would be
+/// left after a period is too short to be worth a separate wake.
+/// Pure logic; testable on host.
+uint32_t ble_window_timer_ms(uint32_t remaining_ms);
+
 class PowerService {
 public:
   // -------------------------------------------------------------------------
@@ -181,7 +197,7 @@ public:
 
   /// Sleep type selected by decide_sleep().
   enum class SleepType {
-    None, ///< Do not sleep (device is unlocked, not Offline, or interval too short)
+    None, ///< Do not sleep (unlocked, mode not eligible, BLE link up, or interval too short)
     Deep, ///< Deep sleep — CPU reboots on wake; does not return from enter_sleep()
   };
 
@@ -189,6 +205,9 @@ public:
   struct SleepDecision {
     SleepType type;       ///< None or Deep
     uint32_t duration_ms; ///< How long to sleep (0 when type == None)
+    /// Wake every BLE_WINDOW_PERIOD_MS to advertise (Portable Sleep), so a
+    /// phone can connect between measurements.
+    bool ble_windows = false;
   };
 
   // -------------------------------------------------------------------------
@@ -292,6 +311,9 @@ public:
   /// Trigger BMS QoN (ship mode).  Device powers off.  Does not return.
   void shutdown();
 
+  /// Wait for Power release, then reboot via timer-only deep sleep, preserving RTC memory.
+  void reboot();
+
   /// Re-configure the BMS watchdog timeout.  See
   /// BmsDevice::set_watchdog_timeout_ms for semantics.  Forwards directly;
   /// no policy or kick-cadence change is applied here.
@@ -331,7 +353,9 @@ public:
   /// Uses Config::deep_sleep_threshold_ms from construction.
   ///
   /// Rules:
-  ///   - Not Offline mode  -> {None, 0}  (only Offline sleeps)
+  ///   - Stationary        -> {None, 0}  (always awake)
+  ///   - Portable          -> {None, 0} unless settings.portable_sleep_enabled
+  ///                          and no BLE link is active (sleep tears BLE down)
   ///   - Unlocked          -> {None, 0}  (never sleep while user is active)
   ///   - sleep_ms >= deep_sleep_threshold_ms -> {Deep, sleep_ms}
   ///   - sleep_ms <  deep_sleep_threshold_ms -> {None, 0}  (stay awake; avoid
@@ -343,8 +367,10 @@ public:
   /// @param lock_state Current lock state.
   /// @param mode       Current operating mode.
   /// @param awake_ms   Milliseconds the device has been awake this cycle.
+  /// @param ble_link_active True while a BLE central is connected or a BLE OTA
+  ///                   transfer is running. Only consulted in Portable mode.
   SleepDecision decide_sleep(const GoSettings &settings, LockState lock_state, OperatingMode mode,
-                             uint32_t awake_ms) const;
+                             uint32_t awake_ms, bool ble_link_active) const;
 
   /// Return true when the given sleep duration is short enough that keeping
   /// the PM sensor powered (GPIO held) across deep sleep is beneficial.
@@ -375,11 +401,27 @@ public:
   /// When `should_hold_pm_sensor(sleep_duration_ms)` is true, the PM power
   /// GPIO is held HIGH during deep sleep via `gpio_hold_en()`.  On ESP32-C5
   /// per-pin hold automatically persists through deep sleep.  The caller
-  /// must set `RtcAppState::sensors_warm`
+  /// must set `RtcAppFlag::SensorsWarm` in the saved state
   /// accordingly before calling `save_state()`.
   ///
-  /// @param sleep_duration_ms How long to sleep before timer wake.
-  void enter_sleep(uint32_t sleep_duration_ms);
+  /// @param sleep_duration_ms How long to sleep before the next measurement.
+  /// @param ble_windows Split the sleep into connect-window wakes (see
+  ///        BLE_WINDOW_PERIOD_MS). The measurement due time is kept in RTC
+  ///        memory for those wakes; otherwise it is cleared.
+  void enter_sleep(uint32_t sleep_duration_ms, bool ble_windows = false);
+
+  /// Go back to deep sleep after a connect-window wake that saw no phone.
+  /// Arms the next segment toward the saved measurement due time. Needs no
+  /// service instance, I2C, or BMS: the window wake initializes none of them,
+  /// and leaves GPIO holds and the LP-core watchdog feeder untouched.
+  /// Does not return (no-op under TEST_HOST).
+  static void resume_ble_window_sleep(int pin_wake_button);
+
+  /// Light sleep using the same timer and EXT1 button mask as deep sleep.
+  /// Returns true for a button wake or a held power button. Wake sources are
+  /// cleared and digital GPIO restored before returning. A sleep error falls
+  /// back to a bounded RTOS delay.
+  bool enter_light_sleep(uint32_t sleep_duration_ms);
 
   // -------------------------------------------------------------------------
   // Boot path (static — call before any service is constructed)
@@ -389,11 +431,20 @@ public:
   /// Translates esp_sleep_get_wakeup_cause() to WakeCause.
   static WakeCause get_wake_cause();
 
+  /// True only for a hardware power-on reset, not a software reset or sleep wake.
+  static bool is_power_on_reset();
+
   /// Returns true when this boot should follow the abbreviated fast path:
   ///   cause == WakeCause::Timer && state.lock_state == LockState::Locked
   ///
   /// Pure logic — no platform dependencies; testable on host.
   static bool is_fast_path_wake(WakeCause cause, const RtcAppState &state);
+
+  /// True when this timer wake is a connect window rather than a measurement:
+  /// a locked Portable Sleep cycle whose measurement is still more than
+  /// BLE_WINDOW_MIN_SLEEP_MS away at @p now_retained_ms.
+  static bool is_ble_window_wake(WakeCause cause, const RtcAppState &state,
+                                 uint64_t now_retained_ms);
 
   /// Release GPIO holds that were enabled before the previous deep sleep.
   ///
@@ -481,3 +532,8 @@ private:
 /// state has been saved.  No dependencies — safe to call early in app_main
 /// before PowerService is constructed.
 RtcAppState load_rtc_app_state();
+
+#ifdef TEST_HOST
+/// Simulate invalid RTC storage independently of host test execution order.
+void invalidate_rtc_app_state_for_test();
+#endif

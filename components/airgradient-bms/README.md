@@ -95,6 +95,7 @@ host tests can construct and validate them without the I2C master.
 | `set_charge_enable(enabled)` | Enable/disable battery charging current path |
 | `set_charge_current_ma(mA)` | Set fast-charge current limit (CC mode) |
 | `set_watchdog_timeout_ms(ms)` | Configure chip-level watchdog timeout |
+| `set_adc_enabled(enabled)` | Enable (continuous) or disable the telemetry ADC; default returns `false` (unsupported) |
 
 The `set_pmid_enabled` primitive is retained for explicit PMID lifecycle
 control (e.g. shutdown sequencing). It is no longer driven by
@@ -107,6 +108,13 @@ same preamble + arm + verify used by `init()`). Used by the product
 layer when an external observation suggests the chip may have
 autonomously cleared `EN_OTG` (BAT_OTGZ / OTG hiccup / TS faults per
 datasheet §8.3.10.3-4). Blocking call; includes a settle delay.
+
+`set_adc_enabled(false)` stops telemetry conversions before ESP deep sleep,
+when nothing reads them. On `BQ25629Bms` it writes `ADC_CONTROL` (REG0x26)
+to `0x00`; `true` writes `ADC_EN=1` with `ADC_RATE=0` (continuous). The
+vendor `init()` re-enables continuous conversion on every boot when
+`enable_adc` is set, and the vendor `read_adc()` re-enables it if it finds
+`ADC_EN` cleared.
 
 See `products/go/docs/power_management.md` for the cell-OCP rationale
 behind session-armed PMID and the PM-invalid-hint recovery mechanism.

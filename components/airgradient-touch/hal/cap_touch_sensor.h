@@ -67,6 +67,11 @@ public:
   // Driver-specific implementations (e.g. CAP1203) override this method.
   // Default: no-op, returns true.
   virtual bool clear_interrupt() { return true; }
+
+  // Puts the controller in its lowest-power state before ESP deep sleep:
+  // sensing stops and the interrupt line stays released. init() must restore
+  // active sensing on the next boot. Default: no-op, returns true.
+  virtual bool deep_sleep() { return true; }
 };
 
 #endif // CAP_TOUCH_SENSOR_H

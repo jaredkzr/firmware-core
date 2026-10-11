@@ -464,7 +464,7 @@ SensorManager &GoHardwareBoard::sensors(bool warm) {
   return *_sensor_manager;
 }
 
-StorageService &GoHardwareBoard::storage() {
+StorageService &GoHardwareBoard::storage_unmounted() {
   assert(_spi_ready && "storage() requires init_spi()");
   if (!_storage) {
     auto *rtc_storage = new RtcPayloadCacheStorage();
@@ -477,11 +477,19 @@ StorageService &GoHardwareBoard::storage() {
 
     _storage = new StorageService(*cache, *nand);
     _storage->restore_cache();
-    if (!_storage->init()) {
+  }
+  return *_storage;
+}
+
+StorageService &GoHardwareBoard::storage() {
+  StorageService &storage = storage_unmounted();
+  if (!_storage_mount_attempted) {
+    _storage_mount_attempted = true;
+    if (!storage.init()) {
       AG_LOGE(TAG, "NAND storage init failed");
     }
   }
-  return *_storage;
+  return storage;
 }
 
 DisplayService &GoHardwareBoard::display() {

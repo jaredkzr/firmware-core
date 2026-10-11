@@ -45,18 +45,50 @@ bool set_learning_offset(GasIndexAlgorithmParams &params, int learning_offset) {
   return true;
 }
 
+/// Recompute the interval-derived coefficients of @p params for a new
+/// sampling interval while keeping its learned state. Sensirion derives these
+/// in init/set_tuning_parameters, both of which also reset the state, so the
+/// coefficients are taken from a scratch instance with the same tuning.
+void retime_gas_index(GasIndexAlgorithmParams &params, float sampling_interval_s) {
+  int32_t index_offset = 0;
+  int32_t learning_offset = 0;
+  int32_t learning_gain = 0;
+  int32_t gating_duration = 0;
+  int32_t initial_std = 0;
+  int32_t gain_factor = 0;
+  GasIndexAlgorithm_get_tuning_parameters(&params, &index_offset, &learning_offset, &learning_gain,
+                                          &gating_duration, &initial_std, &gain_factor);
+
+  GasIndexAlgorithmParams scratch{};
+  GasIndexAlgorithm_init_with_sampling_interval(&scratch, params.mAlgorithm_Type,
+                                                sampling_interval_s);
+  GasIndexAlgorithm_set_tuning_parameters(&scratch, index_offset, learning_offset, learning_gain,
+                                          gating_duration, initial_std, gain_factor);
+
+  params.mSamplingInterval = scratch.mSamplingInterval;
+  params.m_Mean_Variance_Estimator___Gamma_Mean = scratch.m_Mean_Variance_Estimator___Gamma_Mean;
+  params.m_Mean_Variance_Estimator___Gamma_Variance =
+      scratch.m_Mean_Variance_Estimator___Gamma_Variance;
+  params.m_Mean_Variance_Estimator___Gamma_Initial_Mean =
+      scratch.m_Mean_Variance_Estimator___Gamma_Initial_Mean;
+  params.m_Mean_Variance_Estimator___Gamma_Initial_Variance =
+      scratch.m_Mean_Variance_Estimator___Gamma_Initial_Variance;
+  params.m_Adaptive_Lowpass__A1 = scratch.m_Adaptive_Lowpass__A1;
+  params.m_Adaptive_Lowpass__A2 = scratch.m_Adaptive_Lowpass__A2;
+}
+
 } // namespace
 
 SensorManager::SensorManager(Sensors &sensor) : _sensors(sensor) {}
 
 SensorManager::~SensorManager() {}
 
-void SensorManager::warmup_step() {
+void SensorManager::warmup_step(bool condition_gas) {
   if (!_sensors.tvoc_nox && !_sensors.pms_a && !_sensors.pms_b) {
     return;
   }
 
-  if (_sensors.tvoc_nox) {
+  if (condition_gas && _sensors.tvoc_nox) {
     if (!_sensors.tvoc_nox->run_conditioning()) {
       AG_LOGW(TAG, "TVOC/NOx conditioning failed");
     }
@@ -109,6 +141,49 @@ void SensorManager::pm_wake() {
   if (_sensors.pms_b) {
     _sensors.pms_b->wake();
   }
+}
+
+namespace {
+
+/// Log label for one sensor's idle_for_sleep() outcome.
+const char *idle_outcome(bool present, bool ok) {
+  if (!present) {
+    return "absent";
+  }
+  return ok ? "idle" : "failed";
+}
+
+} // namespace
+
+void SensorManager::idle_for_sleep() {
+  bool co2_ok = true;
+  if (_sensors.co2) {
+    co2_ok = _sensors.co2->stop_measurement();
+    if (!co2_ok) {
+      AG_LOGW(TAG, "idle_for_sleep: CO2 stop_measurement failed");
+    }
+  }
+
+  bool tvoc_nox_ok = true;
+  if (_sensors.tvoc_nox) {
+    tvoc_nox_ok = _sensors.tvoc_nox->heater_off();
+    if (!tvoc_nox_ok) {
+      AG_LOGW(TAG, "idle_for_sleep: TVOC/NOx heater_off failed");
+    }
+  }
+
+  bool pressure_ok = true;
+  if (_sensors.pressure) {
+    pressure_ok = _sensors.pressure->standby();
+    if (!pressure_ok) {
+      AG_LOGW(TAG, "idle_for_sleep: pressure standby failed");
+    }
+  }
+
+  AG_LOGI(TAG, "idle_for_sleep: co2=%s tvoc_nox=%s pressure=%s",
+          idle_outcome(_sensors.co2 != nullptr, co2_ok),
+          idle_outcome(_sensors.tvoc_nox != nullptr, tvoc_nox_ok),
+          idle_outcome(_sensors.pressure != nullptr, pressure_ok));
 }
 
 Co2CalibrationResult SensorManager::calibrate_co2() {
@@ -171,6 +246,45 @@ bool SensorManager::configure_tvoc_nox_index(uint32_t sampling_interval_ms,
   _index_configured = true;
   AG_LOGI(TAG, "gas-index algorithm configured (%.0f s interval, tvoc=%d h, nox=%d h)",
           sampling_interval_s, tvoc_learning_offset, nox_learning_offset);
+  return true;
+}
+
+bool SensorManager::get_tvoc_nox_index_state(TvocNoxIndexState &out) const {
+  if (!_index_configured) {
+    return false;
+  }
+  out.voc = _voc_params;
+  out.nox = _nox_params;
+  return true;
+}
+
+bool SensorManager::restore_tvoc_nox_index(const TvocNoxIndexState &state,
+                                           uint32_t sampling_interval_ms) {
+  if (!_sensors.tvoc_nox) {
+    return false;
+  }
+  if (state.voc.mAlgorithm_Type != GasIndexAlgorithm_ALGORITHM_TYPE_VOC ||
+      state.nox.mAlgorithm_Type != GasIndexAlgorithm_ALGORITHM_TYPE_NOX ||
+      sampling_interval_ms < 1000) {
+    return false;
+  }
+
+  _voc_params = state.voc;
+  _nox_params = state.nox;
+  _index_configured = true;
+  (void)set_tvoc_nox_sampling_interval(sampling_interval_ms);
+  AG_LOGI(TAG, "gas-index algorithm resumed (uptime voc=%.0f s nox=%.0f s, %.0f s interval)",
+          _voc_params.mUptime, _nox_params.mUptime, _voc_params.mSamplingInterval);
+  return true;
+}
+
+bool SensorManager::set_tvoc_nox_sampling_interval(uint32_t sampling_interval_ms) {
+  if (!_index_configured || sampling_interval_ms < 1000) {
+    return false;
+  }
+  const float sampling_interval_s = static_cast<float>(sampling_interval_ms) / 1000.0f;
+  retime_gas_index(_voc_params, sampling_interval_s);
+  retime_gas_index(_nox_params, sampling_interval_s);
   return true;
 }
 
@@ -465,9 +579,8 @@ void SensorManager::_accumulate_tvoc_nox(TVOCNOxData &sum, AverageMeasuresCounte
     counters.nox_raw++;
   }
 
-  // Algorithm step — gated by _index_configured. Fast path never
-  // configures the algorithm, so this branch is skipped there and
-  // _last_tvoc_nox only carries raw values into the cache.
+  // Algorithm step — gated by _index_configured. Callers that never
+  // configure or restore the algorithm only get raw values.
   if (_index_configured) {
     if (tvoc_raw_valid) {
       int32_t voc_idx = 0;

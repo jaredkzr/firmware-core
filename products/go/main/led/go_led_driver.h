@@ -45,6 +45,10 @@ public:
   bool set_channel(uint8_t channel, uint8_t pwm) override;
   bool set_rgb(uint8_t b_channel, uint8_t r, uint8_t g, uint8_t b) override;
 
+  /// Clear Chip_EN (DEVICE_CONFIG0 bit 6) to enter standby. Outputs stop
+  /// driving and registers stay I2C-accessible. init() sets Chip_EN again.
+  bool standby() override;
+
 private:
   Config _config;
   LedI2cBusHandle _bus = nullptr;

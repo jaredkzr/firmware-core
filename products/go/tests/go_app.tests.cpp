@@ -8,6 +8,9 @@
 
 #include <catch2/catch_test_macros.hpp>
 
+#include <algorithm>
+
+#include <functional>
 #include <string>
 #include <vector>
 
@@ -27,6 +30,7 @@
 #include "services/sensor_manager.h"
 
 #include "cap_touch_sensor.h"
+#include "config_store.h"
 #include "hal/bms_device.h"
 #include "rtos.h"
 
@@ -43,6 +47,17 @@ struct GlobalSetup {
 
 static GlobalSetup s_global_setup;
 
+// Opt-in retained clock override; existing tests keep their normal host RTOS.
+class ScopedRetainedClock : public FreeRTOS {
+public:
+  explicit ScopedRetainedClock(uint64_t now_ms) : retained_ms(now_ms) { RTOS::set_instance(this); }
+  ~ScopedRetainedClock() { RTOS::set_instance(&s_rtos); }
+
+  uint64_t get_retained_time_ms_impl() override { return retained_ms; }
+
+  uint64_t retained_ms;
+};
+
 // ============================================================================
 // External test_spy (from go_app_stubs.cpp)
 // ============================================================================
@@ -53,6 +68,9 @@ extern RtcDisplaySnapshot rtc_snapshot;
 extern bool rtc_snapshot_valid;
 extern int warmup_step_count;
 extern int pm_sleep_count;
+extern int idle_for_sleep_count;
+extern OperatingMode last_decide_sleep_mode;
+extern bool last_decide_sleep_ble_link;
 extern Measures measures_to_return;
 extern bool sensor_started;
 extern bool gps_started;
@@ -68,6 +86,8 @@ extern bool route_point_appended;
 extern RoutePoint last_route_point;
 extern bool resume_route_result;
 extern bool append_route_point_result;
+extern bool append_route_point_sync_failure;
+extern uint32_t route_point_count;
 extern bool route_ended;
 extern bool cache_backed_up;
 extern bool bms_polled;
@@ -78,12 +98,30 @@ extern PowerSnapshot snapshot_to_return;
 extern PowerService::SleepDecision sleep_decision_to_return;
 extern bool enter_sleep_called;
 extern uint32_t enter_sleep_duration_ms;
+extern bool enter_sleep_ble_windows;
+extern bool portable_ble_start_result;
+extern int portable_ble_start_count;
+extern bool ble_connected;
+extern int ble_deinit_count;
 extern bool should_hold_pm_result;
 extern bool shutdown_called;
+extern bool power_on_reset;
+extern int power_button_level;
+extern bool pm_power_enabled;
+extern bool ext_watchdog_fed;
+extern bool lp_feeder_started;
+extern bool shutdown_prepared;
+extern int light_sleep_count;
+extern uint32_t light_sleep_duration_ms;
+extern bool light_sleep_prepared;
+extern std::function<bool()> light_sleep_callback;
+extern WakeCause wake_cause;
 extern bool orchestrator_init_called;
 extern bool orchestrator_run_called;
 extern WakeCause orchestrator_wake_cause;
 extern BootHandoff orchestrator_handoff;
+extern const BleService *orchestrator_ble_service;
+extern RtcAppState orchestrator_rtc_state;
 extern RtosQueueHandle orchestrator_event_queue;
 extern GoLocalApiService *orchestrator_local_api;
 extern SystemInfo orchestrator_local_api_system_info;
@@ -111,13 +149,25 @@ extern void reset();
 
 class StubBmsDevice : public BmsDevice {
 public:
+  BmsStatus status{};
+  int status_failures_remaining = 0;
+  int status_reads = 0;
+  std::function<bool(BmsStatus &)> status_callback;
   bool init() override { return true; }
   bool read_telemetry(BmsTelemetry &out) override {
     out = BmsTelemetry{};
     return true;
   }
   bool read_status(BmsStatus &out) override {
-    out = BmsStatus{};
+    ++status_reads;
+    out = status;
+    if (status_callback) {
+      return status_callback(out);
+    }
+    if (status_failures_remaining > 0) {
+      --status_failures_remaining;
+      return false;
+    }
     return true;
   }
   bool get_charging_state(BmsChargingState &state) override {
@@ -157,7 +207,7 @@ public:
 // ============================================================================
 
 static bool stub_configure(int, gpio::Mode, gpio::PullMode, gpio::InterruptType) { return true; }
-static int stub_get_level(int) { return 0; }
+static int stub_get_level(int) { return test_spy::power_button_level; }
 static bool stub_set_level(int, int) { return true; }
 static bool stub_add_handler(int, gpio::InterruptHandler, void *) { return true; }
 static bool stub_remove_handler(int) { return true; }
@@ -178,6 +228,26 @@ static const gpio::Hal stub_gpio_hal = {
 // MockBoard
 // ============================================================================
 
+class EmptyConfigStore : public ConfigStore {
+public:
+  ConfigStoreResult get_int(const char *, int &) override { return ConfigStoreResult::NOT_FOUND; }
+  ConfigStoreResult get_bool(const char *, bool &) override { return ConfigStoreResult::NOT_FOUND; }
+  ConfigStoreResult get_string(const char *, std::string &) override {
+    return ConfigStoreResult::NOT_FOUND;
+  }
+  ConfigStoreResult get_float(const char *, float &) override {
+    return ConfigStoreResult::NOT_FOUND;
+  }
+  ConfigStoreResult set_int(const char *, int) override { return ConfigStoreResult::ERROR; }
+  ConfigStoreResult set_bool(const char *, bool) override { return ConfigStoreResult::ERROR; }
+  ConfigStoreResult set_string(const char *, const std::string &) override {
+    return ConfigStoreResult::ERROR;
+  }
+  ConfigStoreResult set_float(const char *, float) override { return ConfigStoreResult::ERROR; }
+  ConfigStoreResult erase(const char *) override { return ConfigStoreResult::ERROR; }
+  ConfigStoreResult commit() override { return ConfigStoreResult::ERROR; }
+};
+
 class MockBoard : public GoBoard {
 public:
   // Call ordering log — records every method call in sequence.
@@ -191,6 +261,7 @@ public:
   bool bms_init_called = false;
   int bms_init_attempts = 0;
   int bms_failures_remaining = 0;
+  std::function<void()> bms_init_callback;
   bool core_init_called = false;
   bool sensors_warm_arg = false;
   bool sensors_called = false;
@@ -202,6 +273,7 @@ public:
   bool isr_installed = false;
   bool isr_removed = false;
   bool press_button_on_isr_install = false;
+  bool return_null_bms = false;
 
   // GPS
   bool new_gps_driver_called = false;
@@ -226,6 +298,9 @@ public:
   bool init_bms() override {
     call_log.push_back("init_bms");
     bms_init_called = true;
+    if (bms_init_callback) {
+      bms_init_callback();
+    }
     if (bms_available) {
       return true;
     }
@@ -259,7 +334,7 @@ public:
   // Service accessors
   ConfigStore &config_store() override {
     call_log.push_back("config_store");
-    return *reinterpret_cast<ConfigStore *>(&_config_store_buf);
+    return _config_store;
   }
   GoSettings load_settings() override {
     call_log.push_back("load_settings");
@@ -267,7 +342,7 @@ public:
   }
   BmsDevice *bms() override {
     call_log.push_back("bms");
-    return bms_available ? &_bms : nullptr;
+    return bms_available && !return_null_bms ? &_bms : nullptr;
   }
   SensorManager &sensors(bool warm) override {
     call_log.push_back("sensors");
@@ -339,10 +414,19 @@ public:
   BoardVariant variant() const override { return BoardVariant::Prototype; }
   std::string serial_number() override { return "test-serial"; }
   const char *firmware_version() override { return "0.0.0-test"; }
-  const gpio::Hal &gpio_hal() override { return stub_gpio_hal; }
+  const gpio::Hal &gpio_hal() override {
+    call_log.push_back("gpio_hal");
+    return stub_gpio_hal;
+  }
   void release_gpio_holds() override { call_log.push_back("release_gpio_holds"); }
-  void ulp_stop() override {}
-  void ulp_start() override {}
+  void ulp_stop() override {
+    call_log.push_back("ulp_stop");
+    test_spy::lp_feeder_started = false;
+  }
+  void ulp_start() override {
+    call_log.push_back("ulp_start");
+    test_spy::lp_feeder_started = true;
+  }
   void restart() override {
     call_log.push_back("restart");
     restart_called = true;
@@ -356,7 +440,10 @@ public:
       *flag = true;
     }
   }
-  void remove_button_isr(int /*pin*/) override { isr_removed = true; }
+  void remove_button_isr(int /*pin*/) override {
+    isr_removed = true;
+    isr_flag = nullptr;
+  }
 
   // --- Test helpers ---
   void press_button() {
@@ -377,12 +464,12 @@ public:
   // Configurable test state
   GoSettings settings{};
   bool bms_available = false;
+  StubBmsDevice _bms;
 
 private:
   // Stub service instances.
   // The stub constructors store refs but never dereference them, so
   // we use a helper to produce "valid" dummy references for construction.
-  StubBmsDevice _bms;
   Sensors _sensors_struct{};
   SensorManager _sensor_manager{_sensors_struct};
   StubTouch _touch;
@@ -391,7 +478,7 @@ private:
   // The stubs never actually use these objects.
   alignas(PayloadCache) static inline char s_cache_buf[sizeof(PayloadCache)];
   alignas(NandStorage) static inline char s_nand_buf[sizeof(NandStorage)];
-  alignas(8) static inline char _config_store_buf[64];
+  EmptyConfigStore _config_store;
   alignas(8) static inline char _gps_driver_buf[512];
   // Radio dummy buffers — never dereferenced through the abstract types.
   alignas(8) static inline char _wifi_hal_buf[64];
@@ -420,6 +507,11 @@ public:
 
   explicit GoAppTestAccess(GoApp &app) : _app(app) {}
 
+  bool detect_charging_only_boot() {
+    BmsStatus status{};
+    return _app.detect_charging_only_boot(status);
+  }
+
   FastPathResult execute_fast_path(const RtcAppState &state, const volatile bool &button,
                                    const RtcDisplaySnapshot *snapshot = nullptr,
                                    bool snapshot_valid = false) {
@@ -429,6 +521,8 @@ public:
   void run_button_wake_path(const RtcAppState &state) { _app.run_button_wake_path(state); }
 
   void run_fast_path(const RtcAppState &state) { _app.run_fast_path(state); }
+
+  void run_ble_window_path(const RtcAppState &state) { _app.run_ble_window_path(state); }
 
   void run_interactive(WakeCause cause, BootHandoff handoff = {}) {
     _app.run_interactive(cause, handoff);
@@ -445,30 +539,384 @@ private:
 TEST_CASE("select_boot_path: Timer + Locked -> FastPath") {
   RtcAppState state{};
   state.lock_state = LockState::Locked;
-  CHECK(select_boot_path(WakeCause::Timer, state) == BootPath::FastPath);
+  CHECK(select_boot_path(WakeCause::Timer, state, false) == BootPath::FastPath);
+}
+
+TEST_CASE("select_boot_path: connect window due -> BleWindow, only for a locked timer wake") {
+  RtcAppState state{};
+  state.mode = OperatingMode::Portable;
+  state.lock_state = LockState::Locked;
+  CHECK(select_boot_path(WakeCause::Timer, state, false, true) == BootPath::BleWindow);
+  CHECK(select_boot_path(WakeCause::Timer, state, false, false) == BootPath::FastPath);
+  CHECK(select_boot_path(WakeCause::Button, state, false, true) == BootPath::ButtonWake);
+  CHECK(select_boot_path(WakeCause::Timer, state, true, true) == BootPath::ChargingOnly);
+  state.lock_state = LockState::Unlocked;
+  CHECK(select_boot_path(WakeCause::Timer, state, false, true) == BootPath::Interactive);
 }
 
 TEST_CASE("select_boot_path: Timer + Unlocked -> Interactive") {
   RtcAppState state{};
   state.lock_state = LockState::Unlocked;
-  CHECK(select_boot_path(WakeCause::Timer, state) == BootPath::Interactive);
+  CHECK(select_boot_path(WakeCause::Timer, state, false) == BootPath::Interactive);
 }
 
 TEST_CASE("select_boot_path: Button + Offline -> ButtonWake") {
   RtcAppState state{};
   state.mode = OperatingMode::Offline;
-  CHECK(select_boot_path(WakeCause::Button, state) == BootPath::ButtonWake);
+  CHECK(select_boot_path(WakeCause::Button, state, false) == BootPath::ButtonWake);
 }
 
-TEST_CASE("select_boot_path: Button + Portable -> Interactive") {
+TEST_CASE("select_boot_path: Button + Portable -> ButtonWake") {
+  // Portable deep-sleeps only with portable_sleep_enabled; its button wake
+  // takes the same snapshot-first unlock path as Offline.
   RtcAppState state{};
   state.mode = OperatingMode::Portable;
-  CHECK(select_boot_path(WakeCause::Button, state) == BootPath::Interactive);
+  CHECK(select_boot_path(WakeCause::Button, state, false) == BootPath::ButtonWake);
+}
+
+TEST_CASE("select_boot_path: Button + Stationary -> Interactive") {
+  RtcAppState state{};
+  state.mode = OperatingMode::Stationary;
+  CHECK(select_boot_path(WakeCause::Button, state, false) == BootPath::Interactive);
 }
 
 TEST_CASE("select_boot_path: PowerOn -> Interactive") {
   RtcAppState state{};
-  CHECK(select_boot_path(WakeCause::PowerOn, state) == BootPath::Interactive);
+  CHECK(select_boot_path(WakeCause::PowerOn, state, false) == BootPath::Interactive);
+}
+
+TEST_CASE("select_boot_path: eligible USB cold boot -> ChargingOnly") {
+  RtcAppState state{};
+  CHECK(select_boot_path(WakeCause::PowerOn, state, true) == BootPath::ChargingOnly);
+}
+
+TEST_CASE("select_boot_path: shutdown request overrides timer fast path") {
+  RtcAppState state{};
+  state.set_flag(RtcAppFlag::ChargingOnlyRequested, true);
+  CHECK(select_boot_path(WakeCause::Timer, state, false) == BootPath::ChargingOnly);
+}
+
+// ============================================================================
+// Tests: charging-only boot
+// ============================================================================
+
+TEST_CASE("Charging-only detection: probes eligibility without running a boot path") {
+  test_spy::reset();
+  test_spy::power_on_reset = true;
+  MockBoard board;
+  board._bms.status.power_source = BmsPowerSource::UsbDcp;
+  GoApp app(board);
+  GoAppTestAccess access(app);
+
+  SECTION("button released") { test_spy::power_button_level = 1; }
+  SECTION("button held") { test_spy::power_button_level = 0; }
+
+  REQUIRE(access.detect_charging_only_boot());
+  CHECK(board.bms_init_attempts == 1);
+  CHECK(DisplayService::spy_init_count == 0);
+  CHECK(test_spy::light_sleep_count == 0);
+  CHECK_FALSE(test_spy::shutdown_called);
+  CHECK_FALSE(test_spy::orchestrator_run_called);
+  CHECK_FALSE(board.sensors_called);
+  CHECK(board.call_index("gpio_hal") == -1);
+  CHECK_FALSE(board.isr_installed);
+}
+
+TEST_CASE("GoApp::run: ineligible charging boots start the application normally") {
+  test_spy::reset();
+  MockBoard board;
+  SECTION("software reset with USB connected") {
+    board._bms.status.power_source = BmsPowerSource::UsbDcp;
+  }
+  SECTION("cold boot on battery") {
+    test_spy::power_on_reset = true;
+    board._bms.status.power_source = BmsPowerSource::None;
+  }
+  GoApp app(board);
+  app.run();
+
+  CHECK(test_spy::orchestrator_run_called);
+  CHECK(test_spy::orchestrator_wake_cause == WakeCause::PowerOn);
+  CHECK(test_spy::light_sleep_count == 0);
+  CHECK_FALSE(test_spy::shutdown_called);
+  CHECK(board.bms_init_attempts == 1);
+  CHECK(board.isr_flag == nullptr);
+}
+
+TEST_CASE("Charging-only boot: light sleep retains charger until unplug, then paints before ship") {
+  for (auto source : {BmsPowerSource::UsbSdp, BmsPowerSource::UsbCdp, BmsPowerSource::UsbDcp,
+                      BmsPowerSource::UnknownAdapter, BmsPowerSource::NonStandard}) {
+    for (auto charge : {BmsChargingState::FastCharge, BmsChargingState::NotCharging,
+                        BmsChargingState::ChargeTerminationDone}) {
+      test_spy::reset();
+      test_spy::power_on_reset = true;
+      MockBoard board;
+      board._bms.status.power_source = source;
+      board._bms.status.charging_state = charge;
+      test_spy::light_sleep_callback = [&] {
+        if (test_spy::light_sleep_count == 2) {
+          board._bms.status.power_source = BmsPowerSource::None;
+        }
+        CHECK(DisplayService::spy_last_screen == (charge == BmsChargingState::ChargeTerminationDone
+                                                      ? Screen::ShutdownCharged
+                                                      : Screen::ShutdownCharging));
+        CHECK(DisplayService::spy_sync_update_count == 0);
+        return false;
+      };
+      GoApp app(board);
+      app.run();
+      CHECK(test_spy::shutdown_called);
+      CHECK(test_spy::shutdown_prepared);
+      CHECK(DisplayService::spy_last_screen == Screen::ShutdownUser);
+      CHECK(DisplayService::spy_sync_update_count == 1);
+      CHECK(test_spy::light_sleep_count == 2);
+      CHECK(test_spy::light_sleep_duration_ms == 2000);
+      CHECK(test_spy::light_sleep_prepared);
+      CHECK(board.bms_init_attempts == 1);
+      CHECK(board._bms.status_reads == 3);
+      CHECK(board.call_index("ulp_start") == -1);
+      CHECK_FALSE(board.isr_installed);
+      CHECK_FALSE(board.sensors_called);
+      CHECK_FALSE(board.new_gps_driver_called);
+      CHECK_FALSE(board.wifi_subsystem_init_called);
+      CHECK(board.call_index("storage") == -1);
+      CHECK(board.call_index("ble_server") == -1);
+      CHECK(board.call_index("led_service") == -1);
+      CHECK(board.call_index("buzzer_service") == -1);
+      CHECK_FALSE(test_spy::bms_polled);         // No runtime charging-policy poll.
+      CHECK_FALSE(test_spy::enter_sleep_called); // No measurement timer sleep.
+    }
+  }
+}
+
+TEST_CASE("Charging-only polling: repaint only on completion and charging resumption") {
+  for (auto resumed :
+       {BmsChargingState::TrickleCharge, BmsChargingState::PreCharge, BmsChargingState::FastCharge,
+        BmsChargingState::TaperCharge, BmsChargingState::TopOffTimerActiveCharging}) {
+    test_spy::reset();
+    test_spy::power_on_reset = true;
+    MockBoard board;
+    board._bms.status.power_source = BmsPowerSource::UsbDcp;
+    board._bms.status.charging_state = BmsChargingState::FastCharge;
+    test_spy::light_sleep_callback = [&] {
+      const auto count = test_spy::light_sleep_count;
+      REQUIRE(count <= 9);
+      CHECK(DisplayService::spy_last_screen ==
+            (count >= 3 && count <= 7 ? Screen::ShutdownCharged : Screen::ShutdownCharging));
+      CHECK(DisplayService::spy_sync_update_count == (count <= 2 ? 0 : count <= 7 ? 1 : 2));
+      switch (count) {
+      case 1:
+      case 6:
+        board._bms.status.charging_state = BmsChargingState::NotCharging;
+        break;
+      case 2:
+      case 3:
+        board._bms.status.charging_state = BmsChargingState::ChargeTerminationDone;
+        break;
+      case 4:
+        board._bms.status.charging_state = resumed;
+        board._bms.status_failures_remaining = 1;
+        break;
+      case 5:
+        board._bms.status.charging_state = BmsChargingState::Unknown;
+        break;
+      case 7:
+      case 8:
+        board._bms.status.charging_state = resumed;
+        break;
+      case 9:
+        board._bms.status.power_source = BmsPowerSource::None;
+        break;
+      }
+      return false;
+    };
+    GoApp app(board);
+    app.run();
+
+    CHECK(test_spy::shutdown_prepared);
+    CHECK(DisplayService::spy_sync_update_count == 3); // Full, charging, powered off.
+    CHECK(test_spy::light_sleep_prepared);
+    CHECK(board.bms_init_attempts == 1);
+    CHECK(board._bms.status_reads == 10);
+  }
+}
+
+TEST_CASE("Charging-only shutdown handoff: consumes the request before entering the loop") {
+  test_spy::reset();
+  test_spy::wake_cause = WakeCause::Timer;
+  test_spy::rtc_state.set_flag(RtcAppFlag::ChargingOnlyRequested, true);
+  MockBoard board;
+  board._bms.status.power_source = BmsPowerSource::UsbDcp;
+  SECTION("charging") { board._bms.status.charging_state = BmsChargingState::FastCharge; }
+  SECTION("full") { board._bms.status.charging_state = BmsChargingState::ChargeTerminationDone; }
+  test_spy::light_sleep_callback = [&] {
+    CHECK_FALSE(test_spy::rtc_state.has_flag(RtcAppFlag::ChargingOnlyRequested));
+    CHECK(DisplayService::spy_init_count == 1);
+    const bool full = board._bms.status.charging_state == BmsChargingState::ChargeTerminationDone;
+    CHECK(DisplayService::spy_last_screen ==
+          (full ? Screen::ShutdownCharged : Screen::ShutdownCharging));
+    CHECK(DisplayService::spy_sync_update_count == 0);
+    return true; // Power button restarts into normal operation.
+  };
+  GoApp app(board);
+  app.run();
+  CHECK_FALSE(test_spy::rtc_state.has_flag(RtcAppFlag::ChargingOnlyRequested));
+  CHECK_FALSE(test_spy::orchestrator_run_called);
+  CHECK_FALSE(board.sensors_called);
+  CHECK(board.restart_called);
+  CHECK_FALSE(test_spy::shutdown_called);
+  CHECK(board.bms_init_attempts == 1);
+  // The following software restart has no request and starts normally.
+  test_spy::wake_cause = WakeCause::PowerOn;
+  app.run();
+  CHECK(test_spy::orchestrator_run_called);
+  CHECK(test_spy::light_sleep_count == 1);
+}
+
+TEST_CASE("Charging-only boot: non-power-on resets leave the boot path untouched") {
+  test_spy::reset();
+  MockBoard board;
+  board._bms.status.power_source = BmsPowerSource::UsbDcp;
+  GoApp app(board);
+  GoAppTestAccess access(app);
+
+  CHECK_FALSE(access.detect_charging_only_boot());
+  CHECK(board.call_log.empty());
+  CHECK_FALSE(board.isr_installed);
+  CHECK_FALSE(test_spy::shutdown_called);
+}
+
+TEST_CASE("Charging-only boot: unconfirmed USB input falls through to normal startup") {
+  test_spy::reset();
+  test_spy::power_on_reset = true;
+  MockBoard board;
+  board._bms.status.power_source = BmsPowerSource::UsbDcp;
+
+  SECTION("battery") { board._bms.status.power_source = BmsPowerSource::None; }
+  SECTION("OTG is not external power") { board._bms.status.power_source = BmsPowerSource::OtgMode; }
+  SECTION("unknown status") { board._bms.status.power_source = BmsPowerSource::Unknown; }
+  SECTION("failed reads cannot use populated status") { board._bms.status_failures_remaining = 10; }
+  SECTION("charger init fails") { board.bms_failures_remaining = 10; }
+  SECTION("null charger") { board.return_null_bms = true; }
+
+  GoApp app(board);
+  GoAppTestAccess access(app);
+  CHECK_FALSE(access.detect_charging_only_boot());
+  CHECK_FALSE(test_spy::shutdown_called);
+  CHECK_FALSE(test_spy::lp_feeder_started);
+  CHECK(DisplayService::spy_init_count == 0);
+  CHECK(board._bms.status_reads <= 3);
+  CHECK(board.bms_init_attempts <= 2);
+  CHECK_FALSE(board.isr_installed);
+  CHECK(board.call_index("gpio_hal") == -1);
+}
+
+TEST_CASE("Charging-only boot: transient charger failures recover within the boot") {
+  test_spy::reset();
+  test_spy::power_on_reset = true;
+  MockBoard board;
+  board._bms.status.power_source = BmsPowerSource::UsbDcp;
+  board.bms_failures_remaining = 1;
+  board._bms.status_failures_remaining = 1;
+  test_spy::light_sleep_callback = [&] {
+    board._bms.status.power_source = BmsPowerSource::None;
+    return false;
+  };
+  GoApp app(board);
+  app.run();
+  CHECK(board.bms_init_attempts == 2);
+  CHECK(board._bms.status_reads == 3); // Two boot attempts and the unplug poll.
+  CHECK(test_spy::shutdown_prepared);
+}
+
+TEST_CASE("Charging-only boot: a startup button press does not override USB detection") {
+  test_spy::reset();
+  test_spy::power_on_reset = true;
+  test_spy::power_button_level = 0;
+  MockBoard board;
+  board._bms.status.power_source = BmsPowerSource::UsbDcp;
+  board._bms.status_callback = [&](BmsStatus &) {
+    // Release the startup press during detection, before normal sleep wake is armed.
+    test_spy::power_button_level = 1;
+    return true;
+  };
+  test_spy::light_sleep_callback = [&] {
+    CHECK(DisplayService::spy_last_screen == Screen::ShutdownCharging);
+    board._bms.status.power_source = BmsPowerSource::None;
+    return false;
+  };
+
+  GoApp app(board);
+  app.run();
+  CHECK_FALSE(board.isr_installed);
+  CHECK(test_spy::shutdown_prepared);
+  CHECK_FALSE(test_spy::lp_feeder_started);
+  CHECK(test_spy::light_sleep_count == 1);
+  CHECK_FALSE(test_spy::orchestrator_run_called);
+}
+
+TEST_CASE("Charging-only button wake: restarts for normal startup") {
+  test_spy::reset();
+  test_spy::power_on_reset = true;
+  MockBoard board;
+  board._bms.status.power_source = BmsPowerSource::UsbDcp;
+  SECTION("charging") { board._bms.status.charging_state = BmsChargingState::FastCharge; }
+  SECTION("fully charged") {
+    board._bms.status.charging_state = BmsChargingState::ChargeTerminationDone;
+  }
+  test_spy::light_sleep_callback = [&] {
+    if (test_spy::light_sleep_count != 3) {
+      return false;
+    }
+    return true; // Button wake even if released before GPIO is sampled.
+  };
+  GoApp app(board);
+  app.run();
+
+  CHECK_FALSE(test_spy::shutdown_called);
+  CHECK_FALSE(test_spy::lp_feeder_started);
+  CHECK(board.bms_init_attempts == 1);
+  CHECK(test_spy::light_sleep_count == 3);
+  CHECK(test_spy::light_sleep_prepared);
+  CHECK(DisplayService::spy_sync_update_count == 0);
+  CHECK(board.restart_called);
+  CHECK_FALSE(board.sensors_called);
+  CHECK_FALSE(test_spy::orchestrator_run_called);
+}
+
+TEST_CASE("Charging-only polling: failed and unknown readings keep the application off") {
+  test_spy::reset();
+  test_spy::power_on_reset = true;
+  MockBoard board;
+  board._bms.status.power_source = BmsPowerSource::UsbDcp;
+  test_spy::light_sleep_callback = [&] {
+    REQUIRE(test_spy::light_sleep_count <= 4);
+    CHECK_FALSE(test_spy::shutdown_called);
+    CHECK(DisplayService::spy_last_screen == Screen::ShutdownCharging);
+    switch (test_spy::light_sleep_count) {
+    case 1:
+      board._bms.status.power_source = BmsPowerSource::None;
+      board._bms.status_failures_remaining = 1;
+      break;
+    case 2:
+      board._bms.status.power_source = BmsPowerSource::Unknown;
+      break;
+    case 3:
+      board._bms.status.power_source = BmsPowerSource::UsbDcp;
+      break;
+    default:
+      board._bms.status.power_source = BmsPowerSource::None;
+      break;
+    }
+    return false;
+  };
+  GoApp app(board);
+  app.run();
+  CHECK(test_spy::shutdown_prepared);
+  CHECK(test_spy::light_sleep_count == 4);
+  CHECK(test_spy::light_sleep_prepared);
+  CHECK(board.bms_init_attempts == 1);
+  CHECK_FALSE(board.sensors_called);
 }
 
 // ============================================================================
@@ -486,7 +934,7 @@ TEST_CASE("is_gps_active_at_boot: AlwaysOff -> false") {
   GoSettings s{};
   s.gps_mode = GpsMode::AlwaysOff;
   RtcAppState state{};
-  state.tracking_active = true;
+  state.tracking_state = TrackingState::Recording;
   CHECK(is_gps_active_at_boot(s, state) == false);
 }
 
@@ -494,7 +942,7 @@ TEST_CASE("is_gps_active_at_boot: OnWhenTracking + tracking -> true") {
   GoSettings s{};
   s.gps_mode = GpsMode::OnWhenTracking;
   RtcAppState state{};
-  state.tracking_active = true;
+  state.tracking_state = TrackingState::Recording;
   CHECK(is_gps_active_at_boot(s, state) == true);
 }
 
@@ -502,7 +950,7 @@ TEST_CASE("is_gps_active_at_boot: OnWhenTracking + idle -> false") {
   GoSettings s{};
   s.gps_mode = GpsMode::OnWhenTracking;
   RtcAppState state{};
-  state.tracking_active = false;
+  state.tracking_state = TrackingState::Idle;
   CHECK(is_gps_active_at_boot(s, state) == false);
 }
 
@@ -585,7 +1033,7 @@ TEST_CASE("build_fast_path_display: valid sensors -> values populated") {
   settings.use_feet = true;
   settings.pm_use_usaqi = true;
 
-  DisplayValues v = build_fast_path_display(m, gps, bms, settings, true);
+  DisplayValues v = build_fast_path_display(m, gps, bms, settings, TrackingState::Recording);
 
   CHECK(v.co2_ppm == 600);
   CHECK(v.pm25_ugm3 == 15.0f);
@@ -593,7 +1041,7 @@ TEST_CASE("build_fast_path_display: valid sensors -> values populated") {
   CHECK(v.humidity_pct == 60.0f);
   CHECK(v.battery_pct == 75);
   CHECK(v.locked == true);
-  CHECK(v.tracking_active == true);
+  CHECK(v.tracking_state == TrackingState::Recording);
   CHECK(v.use_fahrenheit == true);
   CHECK(v.use_feet == true);
   CHECK(v.pm_use_usaqi == true);
@@ -615,7 +1063,7 @@ TEST_CASE("build_fast_path_display: invalid sensors -> sentinels preserved") {
   bms.battery_percentage = -1.0f; // no data
   GoSettings settings{};
 
-  DisplayValues v = build_fast_path_display(m, gps, bms, settings, false);
+  DisplayValues v = build_fast_path_display(m, gps, bms, settings, TrackingState::Idle);
 
   // Invalid sensor data should NOT overwrite DisplayValues defaults
   CHECK(v.co2_ppm == MeasuresInvalid::CO2);
@@ -628,7 +1076,7 @@ TEST_CASE("build_fast_path_display: invalid sensors -> sentinels preserved") {
   CHECK(v.altitude_m == MeasuresInvalid::ALTITUDE);
   CHECK(v.battery_pct == 0xFF); // no battery data
   CHECK(v.gps_fix == false);
-  CHECK(v.tracking_active == false);
+  CHECK(v.tracking_state == TrackingState::Idle);
   CHECK(v.use_fahrenheit == false);
   CHECK(v.use_feet == false);
   CHECK(v.pm_use_usaqi == false);
@@ -649,7 +1097,7 @@ TEST_CASE("build_fast_path_display: applies persisted corrections only to presen
   settings.corrections.temperature.intercept = -1.0f;
 
   const DisplayValues values =
-      build_fast_path_display(m, GpsData{}, PowerSnapshot{}, settings, false);
+      build_fast_path_display(m, GpsData{}, PowerSnapshot{}, settings, TrackingState::Idle);
 
   CHECK(values.pm25_ugm3 == 21.0f);
   CHECK(values.temperature_c == 29.0f);
@@ -677,6 +1125,68 @@ TEST_CASE("build_wake_values: snapshot valid -> values seeded") {
   CHECK(v.use_feet);
   CHECK(v.locked == false);
   CHECK(v.snackbar_text != nullptr);
+}
+
+TEST_CASE("build_wake_values: restores the plug icon state from the snapshot") {
+  RtcDisplaySnapshot snap{};
+  snap.is_plugged_in = true;
+  snap.locked = true;
+
+  DisplayValues v = build_wake_values(snap, true);
+
+  CHECK(v.is_plugged_in);
+  CHECK(v.locked == false); // wake always shows the unlocked frame
+}
+
+TEST_CASE("RTC snapshot round-trips a fast-path frame exactly") {
+  // The retained-panel wake re-renders the previous fast-path frame from the
+  // snapshot; any field lost here would make the hash check fail every wake.
+  MeasuresAGo m{};
+  m.co2.co2 = 640;
+  m.pm_a.pm_25 = 12.5f;
+  m.temp_hum_a.temperature = 22.0f;
+  m.temp_hum_a.humidity = 45.0f;
+  m.tvoc_nox.tvoc_index = 110;
+  m.tvoc_nox.nox_index = 2;
+  m.pressure.pressure = 1009.0f;
+  m.pressure.altitude = 40.0f;
+  PowerSnapshot bms{};
+  bms.battery_percentage = 64.0f;
+  GoSettings settings{};
+  settings.use_fahrenheit = true;
+  settings.pm_use_usaqi = true;
+
+  const DisplayValues painted = build_fast_path_display(m, GpsData{}, bms, settings,
+                                                        TrackingState::Recording);
+  const DisplayValues rebuilt = display_values_from_snapshot(snapshot_from_display_values(painted));
+
+  CHECK(rebuilt.co2_ppm == painted.co2_ppm);
+  CHECK(rebuilt.pm25_ugm3 == painted.pm25_ugm3);
+  CHECK(rebuilt.temperature_c == painted.temperature_c);
+  CHECK(rebuilt.humidity_pct == painted.humidity_pct);
+  CHECK(rebuilt.tvoc_index == painted.tvoc_index);
+  CHECK(rebuilt.nox_index == painted.nox_index);
+  CHECK(rebuilt.pressure_hpa == painted.pressure_hpa);
+  CHECK(rebuilt.altitude_m == painted.altitude_m);
+  CHECK(rebuilt.battery_pct == painted.battery_pct);
+  CHECK(rebuilt.is_battery_charging == painted.is_battery_charging);
+  CHECK(rebuilt.is_plugged_in == painted.is_plugged_in);
+  CHECK(rebuilt.locked == painted.locked);
+  CHECK(rebuilt.ble_enabled == painted.ble_enabled);
+  CHECK(rebuilt.ble_connected == painted.ble_connected);
+  CHECK(rebuilt.wifi_enabled == painted.wifi_enabled);
+  CHECK(rebuilt.gps_enabled == painted.gps_enabled);
+  CHECK(rebuilt.gps_fix == painted.gps_fix);
+  CHECK(rebuilt.tracking_state == painted.tracking_state);
+  CHECK(rebuilt.display_off == painted.display_off);
+  CHECK(rebuilt.use_fahrenheit == painted.use_fahrenheit);
+  CHECK(rebuilt.use_feet == painted.use_feet);
+  CHECK(rebuilt.pm_use_usaqi == painted.pm_use_usaqi);
+  CHECK(rebuilt.screen == painted.screen);
+  CHECK(rebuilt.active_metric == painted.active_metric);
+  CHECK(rebuilt.snackbar_text == painted.snackbar_text);
+  CHECK(rebuilt.chart_samples == painted.chart_samples);
+  CHECK(rebuilt.row_count == painted.row_count);
 }
 
 TEST_CASE("build_wake_values: snapshot invalid -> defaults, unlocked") {
@@ -721,7 +1231,7 @@ TEST_CASE("execute_fast_path: warm sensors, measure, sleep") {
   GoAppTestAccess access(app);
 
   RtcAppState state{};
-  state.sensors_warm = true;
+  state.set_flag(RtcAppFlag::SensorsWarm, true);
   volatile bool button = false;
 
   auto result = access.execute_fast_path(state, button);
@@ -733,6 +1243,7 @@ TEST_CASE("execute_fast_path: warm sensors, measure, sleep") {
   CHECK(board.sensors_warm_arg == true);
   CHECK(board.core_init_called == true);
   CHECK(test_spy::pm_sleep_count == 0); // held warm — sensor not slept
+  CHECK(test_spy::idle_for_sleep_count == 0); // warm wake reattaches running sensors
 }
 
 TEST_CASE("execute_fast_path: cold sensors full warmup, measure, sleep") {
@@ -745,7 +1256,7 @@ TEST_CASE("execute_fast_path: cold sensors full warmup, measure, sleep") {
   GoAppTestAccess access(app);
 
   RtcAppState state{};
-  state.sensors_warm = false;
+  state.set_flag(RtcAppFlag::SensorsWarm, false);
   volatile bool button = false;
 
   auto result = access.execute_fast_path(state, button);
@@ -755,8 +1266,203 @@ TEST_CASE("execute_fast_path: cold sensors full warmup, measure, sleep") {
   CHECK(result.sensors_warm == false);
   CHECK(board.sensors_warm_arg == false);
   CHECK(test_spy::pm_sleep_count == 1); // long sleep — fan stopped for the window
+  CHECK(test_spy::idle_for_sleep_count == 1); // CO2/TVOC/pressure idled for the window
   // Warmup iterations should have been called
   CHECK(test_spy::warmup_step_count > 0);
+}
+
+TEST_CASE("execute_fast_path: raw TVOC/NOx ticks never become the index") {
+  test_spy::reset();
+  test_spy::sleep_decision_to_return = {PowerService::SleepType::Deep, 60000};
+  // The index comes only from the gas-index algorithm (resumed from RTC; see
+  // go_gas_index_rtc tests). Raw ticks stay in the raw fields.
+  test_spy::measures_to_return.tvoc_nox.tvoc_raw = 29806;
+  test_spy::measures_to_return.tvoc_nox.nox_raw = 16519;
+
+  MockBoard board;
+  GoApp app(board);
+  GoAppTestAccess access(app);
+
+  RtcAppState state{};
+  volatile bool button = false;
+
+  auto result = access.execute_fast_path(state, button);
+
+  REQUIRE(result.has_measures);
+  CHECK(result.measures.tvoc_nox.tvoc_index == MeasuresInvalid::TVOC);
+  CHECK(result.measures.tvoc_nox.nox_index == MeasuresInvalid::NOX);
+  CHECK(result.measures.tvoc_nox.tvoc_raw == 29806);
+  CHECK(result.measures.tvoc_nox.nox_raw == 16519);
+}
+
+TEST_CASE("execute_fast_path: decides sleep for the persisted mode with no BLE link") {
+  test_spy::reset();
+  test_spy::sleep_decision_to_return = {PowerService::SleepType::Deep, 60000};
+
+  MockBoard board;
+  GoApp app(board);
+  GoAppTestAccess access(app);
+
+  RtcAppState state{};
+  state.mode = OperatingMode::Portable;
+  volatile bool button = false;
+
+  auto result = access.execute_fast_path(state, button);
+
+  CHECK(result.outcome == GoAppTestAccess::Outcome::Sleep);
+  CHECK(test_spy::last_decide_sleep_mode == OperatingMode::Portable);
+  CHECK_FALSE(test_spy::last_decide_sleep_ble_link);
+}
+
+TEST_CASE("execute_fast_path: Portable Sleep advertises and sleeps in connect windows") {
+  test_spy::reset();
+  test_spy::sleep_decision_to_return = {PowerService::SleepType::Deep, 47000, true};
+  test_spy::portable_ble_start_result = true;
+
+  MockBoard board;
+  board.settings.portable_sleep_enabled = true;
+  GoApp app(board);
+  GoAppTestAccess access(app);
+
+  RtcAppState state{};
+  state.mode = OperatingMode::Portable;
+  volatile bool button = false;
+
+  auto result = access.execute_fast_path(state, button);
+
+  CHECK(test_spy::portable_ble_start_count == 1);
+  CHECK(result.outcome == GoAppTestAccess::Outcome::Sleep);
+  CHECK(result.ble_windows);
+  CHECK(test_spy::ble_deinit_count == 1); // released before deep sleep
+  CHECK_FALSE(test_spy::last_decide_sleep_ble_link);
+}
+
+TEST_CASE("execute_fast_path: BLE stays off outside Portable Sleep") {
+  test_spy::reset();
+  test_spy::portable_ble_start_result = true;
+
+  MockBoard board;
+  GoApp app(board);
+  GoAppTestAccess access(app);
+  volatile bool button = false;
+
+  SECTION("Portable without Portable Sleep") {
+    RtcAppState state{};
+    state.mode = OperatingMode::Portable;
+    (void)access.execute_fast_path(state, button);
+  }
+  SECTION("Offline") {
+    board.settings.portable_sleep_enabled = true;
+    RtcAppState state{};
+    state.mode = OperatingMode::Offline;
+    (void)access.execute_fast_path(state, button);
+  }
+  CHECK(test_spy::portable_ble_start_count == 0);
+}
+
+TEST_CASE("execute_fast_path: a phone connecting during warmup promotes, still locked") {
+  test_spy::reset();
+  test_spy::portable_ble_start_result = true;
+  test_spy::ble_connected = true;
+
+  MockBoard board;
+  board.settings.portable_sleep_enabled = true;
+  GoApp app(board);
+  GoAppTestAccess access(app);
+
+  RtcAppState state{};
+  state.mode = OperatingMode::Portable;
+  state.set_flag(RtcAppFlag::SensorsWarm, false);
+  RtcDisplaySnapshot snapshot{};
+  volatile bool button = false;
+
+  auto result = access.execute_fast_path(state, button, &snapshot, true);
+
+  CHECK(result.outcome == GoAppTestAccess::Outcome::Promote);
+  CHECK(result.handoff.initial_lock_state == LockState::Locked);
+  CHECK(result.handoff.portable_ble != nullptr);
+  CHECK_FALSE(result.handoff.display_painted);
+  CHECK(result.handoff.display_snapshot == &snapshot);
+  CHECK_FALSE(result.handoff.suppress_wake_press);
+  CHECK_FALSE(result.has_measures);
+  CHECK(test_spy::ble_deinit_count == 0); // the link is handed over
+}
+
+TEST_CASE("run_fast_path: Portable Sleep enters deep sleep in connect windows") {
+  test_spy::reset();
+  test_spy::sleep_decision_to_return = {PowerService::SleepType::Deep, 47000, true};
+  MockBoard board;
+  GoApp app(board);
+  GoAppTestAccess access(app);
+  RtcAppState state{};
+  state.mode = OperatingMode::Portable;
+  test_spy::rtc_state = state;
+
+  access.run_fast_path(state);
+
+  CHECK(test_spy::enter_sleep_called);
+  CHECK(test_spy::enter_sleep_duration_ms == 47000);
+  CHECK(test_spy::enter_sleep_ble_windows);
+}
+
+TEST_CASE("run_ble_window_path: no phone goes back to sleep without touching the rest") {
+  test_spy::reset();
+  test_spy::portable_ble_start_result = true;
+  MockBoard board;
+  GoApp app(board);
+  GoAppTestAccess access(app);
+  RtcAppState state{};
+  state.mode = OperatingMode::Portable;
+
+  access.run_ble_window_path(state);
+
+  CHECK(test_spy::portable_ble_start_count == 1);
+  CHECK(test_spy::ble_deinit_count == 1);
+  CHECK_FALSE(test_spy::orchestrator_init_called);
+  CHECK(board.isr_removed);
+  const auto &log = board.call_log;
+  // The LP core keeps feeding the watchdog; sensors, BMS, and holds are untouched.
+  CHECK(std::find(log.begin(), log.end(), "ulp_stop") == log.end());
+  CHECK(std::find(log.begin(), log.end(), "init_buses") == log.end());
+  CHECK(std::find(log.begin(), log.end(), "release_gpio_holds") == log.end());
+}
+
+TEST_CASE("run_ble_window_path: a connected phone hands its BLE link to interactive") {
+  test_spy::reset();
+  test_spy::portable_ble_start_result = true;
+  test_spy::ble_connected = true;
+  MockBoard board;
+  GoApp app(board);
+  GoAppTestAccess access(app);
+  RtcAppState state{};
+  state.mode = OperatingMode::Portable;
+  test_spy::rtc_state = state;
+
+  access.run_ble_window_path(state);
+
+  REQUIRE(test_spy::orchestrator_init_called);
+  CHECK(test_spy::ble_deinit_count == 0);
+  const BootHandoff &handoff = test_spy::orchestrator_handoff;
+  CHECK(handoff.initial_lock_state == LockState::Locked);
+  REQUIRE(handoff.portable_ble != nullptr);
+  CHECK(test_spy::orchestrator_ble_service == handoff.portable_ble->ble);
+  CHECK(test_spy::orchestrator_event_queue == handoff.portable_ble->event_queue);
+  const auto &log = board.call_log;
+  CHECK(std::find(log.begin(), log.end(), "ulp_stop") != log.end());
+}
+
+TEST_CASE("run_ble_window_path: BLE failure still sleeps") {
+  test_spy::reset();
+  test_spy::portable_ble_start_result = false;
+  MockBoard board;
+  GoApp app(board);
+  GoAppTestAccess access(app);
+  RtcAppState state{};
+  state.mode = OperatingMode::Portable;
+
+  access.run_ble_window_path(state);
+
+  CHECK_FALSE(test_spy::orchestrator_init_called);
 }
 
 TEST_CASE("Offline fast path: temperature trip paints shutdown screen and shuts down") {
@@ -771,7 +1477,7 @@ TEST_CASE("Offline fast path: temperature trip paints shutdown screen and shuts 
     RtcAppState state{};
     state.mode = OperatingMode::Offline;
     state.lock_state = LockState::Locked;
-    state.sensors_warm = true;
+    state.set_flag(RtcAppFlag::SensorsWarm, true);
 
     access.run_fast_path(state);
 
@@ -800,7 +1506,7 @@ TEST_CASE("execute_fast_path: button during warmup -> promote unlocked") {
   GoAppTestAccess access(app);
 
   RtcAppState state{};
-  state.sensors_warm = false;
+  state.set_flag(RtcAppFlag::SensorsWarm, false);
   volatile bool button = true; // already pressed
 
   auto result = access.execute_fast_path(state, button);
@@ -820,7 +1526,7 @@ TEST_CASE("execute_fast_path: sleep too short -> promote locked") {
   GoAppTestAccess access(app);
 
   RtcAppState state{};
-  state.sensors_warm = true;
+  state.set_flag(RtcAppFlag::SensorsWarm, true);
   volatile bool button = false;
 
   auto result = access.execute_fast_path(state, button);
@@ -843,8 +1549,8 @@ TEST_CASE("execute_fast_path: tracking + GPS active -> route point stored") {
   GoAppTestAccess access(app);
 
   RtcAppState state{};
-  state.sensors_warm = true;
-  state.tracking_active = true;
+  state.set_flag(RtcAppFlag::SensorsWarm, true);
+  state.tracking_state = TrackingState::Recording;
   state.tracking_session_id = 12345;
   volatile bool button = false;
 
@@ -862,6 +1568,32 @@ TEST_CASE("execute_fast_path: tracking + GPS active -> route point stored") {
   CHECK(board.new_gps_driver_called == true);
 }
 
+TEST_CASE("execute_fast_path: paused session keeps GPS and display but writes no route") {
+  test_spy::reset();
+  test_spy::sleep_decision_to_return = {PowerService::SleepType::Deep, 60000};
+  MockBoard board;
+  board.settings.gps_mode = GpsMode::OnWhenTracking;
+  GoApp app(board);
+  GoAppTestAccess access(app);
+  RtcAppState state{};
+  state.set_flag(RtcAppFlag::SensorsWarm, true);
+  state.tracking_state = TrackingState::Paused;
+  state.tracking_session_id = 12345;
+  volatile bool button = false;
+  CHECK(is_gps_active_at_boot(board.settings, state));
+  auto result = access.execute_fast_path(state, button);
+  CHECK(result.outcome == GoAppTestAccess::Outcome::Sleep);
+  CHECK_FALSE(test_spy::route_resumed);
+  CHECK_FALSE(test_spy::route_started);
+  CHECK_FALSE(test_spy::route_point_appended);
+  CHECK(board.new_gps_driver_called);
+  CHECK(state.tracking_state == TrackingState::Paused);
+  CHECK(state.tracking_session_id == 12345);
+  const auto display = build_fast_path_display(MeasuresAGo{}, GpsData{}, PowerSnapshot{},
+                                               board.settings, state.tracking_state);
+  CHECK(display.tracking_state == TrackingState::Paused);
+}
+
 TEST_CASE("execute_fast_path: degraded route uses fuel-gauge battery snapshot") {
   test_spy::reset();
   test_spy::sleep_decision_to_return = {PowerService::SleepType::Deep, 60000};
@@ -874,8 +1606,8 @@ TEST_CASE("execute_fast_path: degraded route uses fuel-gauge battery snapshot") 
   GoAppTestAccess access(app);
 
   RtcAppState state{};
-  state.sensors_warm = true;
-  state.tracking_active = true;
+  state.set_flag(RtcAppFlag::SensorsWarm, true);
+  state.tracking_state = TrackingState::Recording;
   state.tracking_session_id = 12345;
   volatile bool button = false;
 
@@ -899,8 +1631,8 @@ TEST_CASE("execute_fast_path: resume_route failure -> promote, no display painte
   GoAppTestAccess access(app);
 
   RtcAppState state{};
-  state.sensors_warm = true;
-  state.tracking_active = true;
+  state.set_flag(RtcAppFlag::SensorsWarm, true);
+  state.tracking_state = TrackingState::Recording;
   state.tracking_session_id = 12345;
   volatile bool button = false;
 
@@ -909,7 +1641,7 @@ TEST_CASE("execute_fast_path: resume_route failure -> promote, no display painte
   CHECK(result.outcome == GoAppTestAccess::Outcome::Promote);
   // tracking_active stays set in the inbound state so the orchestrator
   // retries the resume during init() and surfaces the failure there.
-  CHECK(state.tracking_active == true);
+  CHECK(state.tracking_state == TrackingState::Recording);
   CHECK(result.handoff.initial_lock_state == LockState::Locked);
   // Storage failed before the display block — display was NOT painted.
   CHECK(result.handoff.display_painted == false);
@@ -928,15 +1660,15 @@ TEST_CASE("execute_fast_path: append_route_point failure -> promote, no display 
   GoAppTestAccess access(app);
 
   RtcAppState state{};
-  state.sensors_warm = true;
-  state.tracking_active = true;
+  state.set_flag(RtcAppFlag::SensorsWarm, true);
+  state.tracking_state = TrackingState::Recording;
   state.tracking_session_id = 12345;
   volatile bool button = false;
 
   auto result = access.execute_fast_path(state, button);
 
   CHECK(result.outcome == GoAppTestAccess::Outcome::Promote);
-  CHECK(state.tracking_active == true);
+  CHECK(state.tracking_state == TrackingState::Recording);
   CHECK(result.handoff.initial_lock_state == LockState::Locked);
   CHECK(result.handoff.display_painted == false);
   // Resume succeeded; end_route still ran as best-effort close.
@@ -955,8 +1687,8 @@ TEST_CASE("execute_fast_path: tracking + GPS off -> no GPS read") {
   GoAppTestAccess access(app);
 
   RtcAppState state{};
-  state.sensors_warm = true;
-  state.tracking_active = true;
+  state.set_flag(RtcAppFlag::SensorsWarm, true);
+  state.tracking_state = TrackingState::Recording;
   volatile bool button = false;
 
   auto result = access.execute_fast_path(state, button);
@@ -974,14 +1706,326 @@ TEST_CASE("execute_fast_path: no tracking -> no route") {
   GoAppTestAccess access(app);
 
   RtcAppState state{};
-  state.sensors_warm = true;
-  state.tracking_active = false;
+  state.set_flag(RtcAppFlag::SensorsWarm, true);
+  state.tracking_state = TrackingState::Idle;
   volatile bool button = false;
 
   auto result = access.execute_fast_path(state, button);
 
   CHECK(result.outcome == GoAppTestAccess::Outcome::Sleep);
   CHECK(test_spy::route_started == false);
+}
+
+// ============================================================================
+// Tests: fast-path retained tracking timing
+// ============================================================================
+
+static RtcAppState recording_rtc_state() {
+  constexpr uint32_t RESERVED_RTC_FLAG = uint32_t{1} << 31;
+  RtcAppState state{};
+  state.mode = OperatingMode::Offline;
+  state.behavior = Behavior::Tracking;
+  state.set_flag(RtcAppFlag::SensorsWarm, true);
+  state.flags |= RESERVED_RTC_FLAG;
+  state.tracking_state = TrackingState::Recording;
+  state.tracking_session_id = 12345;
+  state.tracking_timing = {100, 20, 150, 160};
+  return state;
+}
+
+static void check_tracking_timing(const TrackingTiming &actual, const TrackingTiming &expected) {
+  CHECK(actual.session_started_s == expected.session_started_s);
+  CHECK(actual.recording_accumulated_s == expected.recording_accumulated_s);
+  CHECK(actual.recording_started_s == expected.recording_started_s);
+  CHECK(actual.last_record_s == expected.last_record_s);
+}
+
+static void check_rtc_state(const RtcAppState &actual, const RtcAppState &expected) {
+  CHECK(actual.mode == expected.mode);
+  CHECK(actual.behavior == expected.behavior);
+  CHECK(actual.lock_state == expected.lock_state);
+  CHECK(actual.tracking_state == expected.tracking_state);
+  CHECK(actual.tracking_session_id == expected.tracking_session_id);
+  CHECK(actual.flags == expected.flags);
+  check_tracking_timing(actual.tracking_timing, expected.tracking_timing);
+}
+
+TEST_CASE("execute_fast_path: accepted write carries retained seconds into Sleep or late Promote") {
+  test_spy::reset();
+  ScopedRetainedClock clock(200999);
+  test_spy::route_point_count = 7;
+  auto expected_outcome = GoAppTestAccess::Outcome::Sleep;
+  bool expected_display_painted = false;
+  SECTION("sleep after accepted write") {}
+  SECTION("late promotion after accepted write") {
+    test_spy::sleep_decision_to_return = {PowerService::SleepType::None, 0};
+    expected_outcome = GoAppTestAccess::Outcome::Promote;
+    expected_display_painted = true;
+  }
+  SECTION("sync error after accepted write still timestamps and promotes") {
+    test_spy::append_route_point_sync_failure = true;
+    expected_outcome = GoAppTestAccess::Outcome::Promote;
+  }
+
+  MockBoard board;
+  GoApp app(board);
+  GoAppTestAccess access(app);
+  const auto state = recording_rtc_state();
+  volatile bool button = false;
+  const auto result = access.execute_fast_path(state, button);
+
+  CHECK(result.outcome == expected_outcome);
+  CHECK(result.handoff.display_painted == expected_display_painted);
+  CHECK(result.has_measures);
+  CHECK(test_spy::route_point_appended);
+  CHECK(test_spy::route_ended);
+  CHECK(test_spy::route_point_count == 0); // Closing resets the writer, not the accepted timestamp.
+  auto expected = state.tracking_timing;
+  expected.last_record_s = 200;
+  check_tracking_timing(result.tracking_timing, expected);
+  CHECK(state.tracking_timing.last_record_s == 160); // Input remains a snapshot.
+}
+
+TEST_CASE("execute_fast_path: early promotion and rejected writes preserve tracking timing") {
+  test_spy::reset();
+  ScopedRetainedClock clock(200999);
+  test_spy::route_point_count = 7;
+  auto state = recording_rtc_state();
+  volatile bool button = false;
+  bool append_attempted = false;
+  SECTION("button interrupts warmup") {
+    state.set_flag(RtcAppFlag::SensorsWarm, false);
+    button = true;
+  }
+  SECTION("button after warm measurement") { button = true; }
+  SECTION("route reopen failure") { test_spy::resume_route_result = false; }
+  SECTION("write rejected with existing nonzero count") {
+    test_spy::append_route_point_result = false;
+    append_attempted = true;
+  }
+
+  MockBoard board;
+  GoApp app(board);
+  GoAppTestAccess access(app);
+  const auto result = access.execute_fast_path(state, button);
+
+  CHECK(result.outcome == GoAppTestAccess::Outcome::Promote);
+  CHECK_FALSE(result.handoff.display_painted);
+  CHECK(test_spy::route_point_appended == append_attempted);
+  CHECK(test_spy::route_ended == append_attempted);
+  CHECK(result.handoff.initial_lock_state == (button ? LockState::Unlocked : LockState::Locked));
+  check_tracking_timing(result.tracking_timing, state.tracking_timing);
+}
+
+TEST_CASE("execute_fast_path: paused timing is preserved and inactive timing is cleared") {
+  test_spy::reset();
+  ScopedRetainedClock clock(200999);
+  auto state = recording_rtc_state();
+  state.tracking_state = TrackingState::Paused;
+  state.tracking_timing.recording_accumulated_s = 30;
+  state.tracking_timing.recording_started_s = TRACKING_TIME_INVALID_S;
+  auto expected = state.tracking_timing;
+  volatile bool button = false;
+  SECTION("paused sleep") {}
+  SECTION("paused early promotion") { button = true; }
+  SECTION("paused with live marker invalidates active duration") {
+    state.tracking_timing.recording_started_s = 150;
+    expected.recording_accumulated_s = TRACKING_TIME_INVALID_S;
+  }
+  SECTION("inactive sleep clears stale timing") {
+    state.tracking_state = TrackingState::Idle;
+    expected = {};
+  }
+  SECTION("inactive early promotion clears stale timing") {
+    state.tracking_state = TrackingState::Idle;
+    expected = {};
+    button = true;
+  }
+
+  MockBoard board;
+  GoApp app(board);
+  GoAppTestAccess access(app);
+  const auto result = access.execute_fast_path(state, button);
+
+  CHECK(result.outcome ==
+        (button ? GoAppTestAccess::Outcome::Promote : GoAppTestAccess::Outcome::Sleep));
+  CHECK_FALSE(test_spy::route_resumed);
+  CHECK_FALSE(test_spy::route_point_appended);
+  check_tracking_timing(result.tracking_timing, expected);
+}
+
+TEST_CASE("execute_fast_path: early promotion normalizes mismatched state and segment") {
+  test_spy::reset();
+  ScopedRetainedClock clock(200999);
+  auto state = recording_rtc_state();
+  SECTION("Recording with paused marker") {
+    state.tracking_timing.recording_started_s = TRACKING_TIME_INVALID_S;
+  }
+  SECTION("Paused with live marker") { state.tracking_state = TrackingState::Paused; }
+
+  MockBoard board;
+  GoApp app(board);
+  GoAppTestAccess access(app);
+  volatile bool button = true;
+  const auto result = access.execute_fast_path(state, button);
+
+  CHECK(result.outcome == GoAppTestAccess::Outcome::Promote);
+  CHECK_FALSE(test_spy::route_point_appended);
+  auto expected = state.tracking_timing;
+  expected.recording_accumulated_s = TRACKING_TIME_INVALID_S;
+  expected.recording_started_s = TRACKING_TIME_INVALID_S;
+  check_tracking_timing(result.tracking_timing, expected);
+}
+
+TEST_CASE("execute_fast_path: unknown active duration allows accepted-record timestamps") {
+  test_spy::reset();
+  ScopedRetainedClock clock(200999);
+  auto state = recording_rtc_state();
+  SECTION("Recording with paused marker") {
+    state.tracking_timing.recording_started_s = TRACKING_TIME_INVALID_S;
+  }
+  SECTION("accumulated duration is unknown") {
+    state.tracking_timing.recording_accumulated_s = TRACKING_TIME_INVALID_S;
+  }
+  SECTION("entire active duration is unknown") {
+    state.tracking_timing.recording_accumulated_s = TRACKING_TIME_INVALID_S;
+    state.tracking_timing.recording_started_s = TRACKING_TIME_INVALID_S;
+  }
+  for (bool sync_failure : {false, true}) {
+    CAPTURE(sync_failure);
+    test_spy::reset();
+    test_spy::append_route_point_sync_failure = sync_failure;
+    MockBoard board;
+    GoApp app(board);
+    GoAppTestAccess access(app);
+    volatile bool button = false;
+    const auto result = access.execute_fast_path(state, button);
+
+    CHECK(result.outcome ==
+          (sync_failure ? GoAppTestAccess::Outcome::Promote : GoAppTestAccess::Outcome::Sleep));
+    CHECK(test_spy::route_point_appended);
+    CHECK(test_spy::route_ended);
+    auto expected = state.tracking_timing;
+    expected.recording_accumulated_s = TRACKING_TIME_INVALID_S;
+    expected.last_record_s = 200;
+    check_tracking_timing(result.tracking_timing, expected);
+  }
+}
+
+TEST_CASE("execute_fast_path: invalid accepted-record time invalidates only last_record_s") {
+  test_spy::reset();
+  ScopedRetainedClock clock(200999);
+  auto state = recording_rtc_state();
+  auto expected_outcome = GoAppTestAccess::Outcome::Sleep;
+  SECTION("clock exceeds representable seconds") {
+    clock.retained_ms = static_cast<uint64_t>(TRACKING_TIME_INVALID_S) * 1000;
+  }
+  SECTION("clock regresses behind last accepted record") { clock.retained_ms = 159999; }
+  SECTION("invalid time and accepted write with sync failure") {
+    clock.retained_ms = 99999;
+    test_spy::append_route_point_sync_failure = true;
+    expected_outcome = GoAppTestAccess::Outcome::Promote;
+  }
+
+  MockBoard board;
+  GoApp app(board);
+  GoAppTestAccess access(app);
+  volatile bool button = false;
+  const auto result = access.execute_fast_path(state, button);
+
+  CHECK(result.outcome == expected_outcome);
+  CHECK(test_spy::route_point_appended);
+  auto expected = state.tracking_timing;
+  expected.last_record_s = TRACKING_TIME_INVALID_S;
+  check_tracking_timing(result.tracking_timing, expected);
+}
+
+TEST_CASE("execute_fast_path: Shutdown result clears timing without changing route lifecycle") {
+  test_spy::reset();
+  ScopedRetainedClock clock(200999);
+  test_spy::snapshot_to_return.ship_mode_request = ShipModeRequest::OverTemperature;
+  MockBoard board;
+  GoApp app(board);
+  GoAppTestAccess access(app);
+  const auto state = recording_rtc_state();
+  volatile bool button = false;
+  const auto result = access.execute_fast_path(state, button);
+
+  CHECK(result.outcome == GoAppTestAccess::Outcome::Shutdown);
+  check_tracking_timing(result.tracking_timing, TrackingTiming{});
+  CHECK(state.tracking_state == TrackingState::Recording);
+  CHECK(state.tracking_session_id == 12345);
+  CHECK_FALSE(test_spy::state_saved);
+}
+
+TEST_CASE("run_fast_path: Sleep saves returned timing with SensorsWarm") {
+  test_spy::reset();
+  ScopedRetainedClock clock(200999);
+  SECTION("hold sensors warm") { test_spy::should_hold_pm_result = true; }
+  SECTION("power down sensors") { test_spy::should_hold_pm_result = false; }
+  MockBoard board;
+  GoApp app(board);
+  GoAppTestAccess access(app);
+  const auto state = recording_rtc_state();
+  test_spy::rtc_state = state;
+
+  access.run_fast_path(state);
+
+  REQUIRE(test_spy::state_saved);
+  CHECK(test_spy::enter_sleep_called);
+  CHECK_FALSE(test_spy::orchestrator_init_called);
+  auto expected = state;
+  expected.tracking_timing.last_record_s = 200;
+  expected.set_flag(RtcAppFlag::SensorsWarm, test_spy::should_hold_pm_result);
+  check_rtc_state(test_spy::last_saved_state, expected);
+  check_rtc_state(test_spy::rtc_state, expected);
+}
+
+TEST_CASE("run_fast_path: promotion saves timing before BMS retry and interactive init") {
+  test_spy::reset();
+  ScopedRetainedClock clock(200999);
+  test_spy::sleep_decision_to_return = {PowerService::SleepType::None, 0};
+  MockBoard board;
+  board.bms_failures_remaining = 2;
+  const auto state = recording_rtc_state();
+  test_spy::rtc_state = state;
+  auto expected = state;
+  expected.tracking_timing.last_record_s = 200;
+  bool expect_restart = false;
+  SECTION("late promotion hands updated RTC to init") {}
+  SECTION("sync failure hands accepted timestamp to init") {
+    test_spy::append_route_point_sync_failure = true;
+  }
+  SECTION("early promotion hands original timing to init") {
+    board.press_button_on_isr_install = true;
+    expected = state;
+  }
+  SECTION("BMS retry failure retains accepted timestamp before restart") {
+    board.bms_failures_remaining = 4;
+    expect_restart = true;
+  }
+  bool checked_retry_state = false;
+  board.bms_init_callback = [&] {
+    if (board.bms_init_attempts >= 2) {
+      REQUIRE(test_spy::state_saved);
+      check_rtc_state(test_spy::rtc_state, expected);
+      checked_retry_state = true;
+    }
+  };
+  GoApp app(board);
+  GoAppTestAccess access(app);
+
+  access.run_fast_path(state);
+
+  CHECK(checked_retry_state);
+  CHECK(board.restart_called == expect_restart);
+  CHECK(test_spy::orchestrator_init_called == !expect_restart);
+  CHECK_FALSE(test_spy::enter_sleep_called);
+  check_rtc_state(test_spy::last_saved_state, expected);
+  if (!expect_restart) {
+    check_rtc_state(test_spy::orchestrator_rtc_state, expected);
+    CHECK(test_spy::orchestrator_wake_cause == WakeCause::Timer);
+  }
 }
 
 // ============================================================================
@@ -998,7 +2042,7 @@ TEST_CASE("execute_fast_path: retries BMS initialization once") {
   GoAppTestAccess access(app);
 
   RtcAppState state{};
-  state.sensors_warm = true;
+  state.set_flag(RtcAppFlag::SensorsWarm, true);
   volatile bool button = false;
 
   const auto result = access.execute_fast_path(state, button);
@@ -1095,7 +2139,7 @@ TEST_CASE("execute_fast_path: init ordering — init_core before load_settings b
   GoAppTestAccess access(app);
 
   RtcAppState state{};
-  state.sensors_warm = true;
+  state.set_flag(RtcAppFlag::SensorsWarm, true);
   volatile bool button = false;
 
   access.execute_fast_path(state, button);
@@ -1123,7 +2167,7 @@ TEST_CASE("execute_fast_path: sleep path ordering — sensors before storage bef
   GoAppTestAccess access(app);
 
   RtcAppState state{};
-  state.sensors_warm = true;
+  state.set_flag(RtcAppFlag::SensorsWarm, true);
   volatile bool button = false;
 
   access.execute_fast_path(state, button);
@@ -1144,7 +2188,7 @@ TEST_CASE("execute_fast_path: release_gpio_holds after init_core") {
   GoAppTestAccess access(app);
 
   RtcAppState state{};
-  state.sensors_warm = true;
+  state.set_flag(RtcAppFlag::SensorsWarm, true);
   volatile bool button = false;
 
   access.execute_fast_path(state, button);

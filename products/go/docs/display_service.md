@@ -11,6 +11,7 @@ which returns immediately; the slow EPD refresh runs in a dedicated task.
 |---|---|
 | `products/go/main/go_display.h` | `DisplayService` class, `DisplayValues` struct, `RtcDisplaySnapshot` struct, `Screen`/`Metric` enums, free functions |
 | `products/go/main/go_display.cpp` | Rendering pipeline, refresh logic, worker task, display driver, RTC snapshot storage, session-screen draw routines |
+| `products/go/main/go_display_refresh.h` | `RefreshMode` enum, `CleanupPolicy`, and the pure, host-testable refresh decisions and frame hash |
 | `products/go/main/go_text_wrap.h` | Pure host-testable word-wrap helper (`compute_wrapped_lines`) used by `_draw_info()` and the auto-wrapped Provisioning status line |
 | `products/go/main/go_text_wrap.cpp` | Implementation of the word-wrap helper |
 
@@ -49,34 +50,43 @@ All pin assignments come from `board_config.h` via `Config` struct members.
 | `clock_hz` | `int` | 4000000 | SPI clock frequency |
 | `task_stack_size` | `uint16_t` | 4096 | Worker task stack size |
 | `task_priority` | `uint8_t` | 4 | Worker task RTOS priority |
-| `max_partial_ops` | `uint8_t` | 20 | Differential op limit before forced full GC |
+| `max_partial_ops` | `uint8_t` | 60 | Partials before a ghosting cleanup is forced (devices that never lock) |
+| `lock_cleanup_min_ops` | `uint8_t` | 5 | Partials needed before locking runs a cleanup |
+| `max_fast_cleanups` | `uint8_t` | 5 | Fast cleanups before the next cleanup escalates to Full |
 
 ### Methods
 
 | Method | Blocking | Description |
 |---|---|---|
-| `init(initial, defer_refresh=false)` | Depends | Init driver + u8g2, render initial frame. See below. |
+| `init(initial, defer_refresh=false, painted=nullptr)` | Depends | Init driver + u8g2, render initial frame. See below. |
 | `update(values, wait)` | No* | Render frame, signal worker. `wait=true` blocks until any prior worker job clears so the new frame queues without being dropped (does **not** wait for the new frame to finish painting; use `flush()` for that). |
-| `update_sync(values)` | Yes | Render + SPI inline; for fast-path boot without worker |
+| `update_sync(values)` | Yes | Render + Full refresh inline, without the worker |
+| `request_cleanup()` | No | Run the ghosting cleanup on the next `update()` if enough Partials accumulated. Called by `Orchestrator::lock()` |
 | `flush()` | Yes | Spin until `_worker_busy` clears so the most-recently-queued frame is fully painted. Cheap polling with `RTOS::delay_ms(1)`, mirroring `clear()` / `stop()`. Used by every session transition that gates a fixed-duration on-screen dwell (the 500 ms STA `Connected!` hold, the 1.5 s provisioning `Connected!` hold, the `SwitchingTransport` ack, both leave-session renders) and by shutdown before the post-paint power-off dwell. MUST NOT be called from the display worker task itself. |
 | `clear()` | Yes | Clear display to white via full refresh |
 | `deep_sleep()` | Yes | Put SSD1680 into deep sleep mode 1 (~100 µA → <1 µA) |
 | `stop()` | Yes | Stop worker task; call before ESP deep sleep |
 
-#### `init()` — `defer_refresh` parameter
+#### `init()` parameters
 
 ```cpp
-bool init(const DisplayValues &initial, bool defer_refresh = false);
+bool init(const DisplayValues &initial, bool defer_refresh = false,
+          const DisplayValues *painted = nullptr);
 ```
 
 | `defer_refresh` | Behavior |
 |---|---|
-| `false` (default) | Synchronous: renders frame, performs full SPI refresh (~3 s), then starts worker. Used by `run_fast_path()`. |
-| `true` | Deferred: renders and reserves the framebuffer, marks a full refresh pending, starts the worker, and immediately signals it to run the initial refresh in the background. Returns in ~10 ms. Used by button-wake and interactive boots with no painted frame. |
+| `false` (default) | Synchronous: renders frame, performs the initial refresh, then starts worker. Used by `run_fast_path()`. |
+| `true` | Deferred: renders and reserves the framebuffer, marks the initial refresh pending, starts the worker, and immediately signals it to run the refresh in the background. Returns in ~10 ms. Used by button-wake and interactive boots with no painted frame. |
+
+`painted` describes the frame believed to be on the panel from before deep
+sleep (rebuilt from the RTC snapshot). When it verifies, the initial refresh
+is a flash-free Partial instead of a Full; see
+[Retained Panel After Deep Sleep](#retained-panel-after-deep-sleep).
 
 When `defer_refresh=true`, `init()` returns before the SPI refresh begins.
 The worker task acquires the SPI bus and holds it for the duration of the
-refresh (~3 s). Button-wake storage relies on the SPI bus arbitration during
+refresh (up to ~3 s for a Full). Button-wake storage relies on the SPI bus arbitration during
 this window. Interactive boot calls `flush()` before mounting NAND storage, so
 it deterministically waits for the early splash refresh to finish.
 
@@ -86,9 +96,15 @@ it deterministically waits for the early splash refresh to finish.
 ## RTC Display Snapshot
 
 `RtcDisplaySnapshot` is a flat struct of scalar fields (no pointers) stored in
-RTC slow memory so it survives deep sleep. It is saved by
-`prepare_for_sleep()` just before the device enters deep sleep, and loaded by
-`run_button_wake_path()` at the very start of a button-wake boot.
+RTC slow memory so it survives deep sleep. It is saved after the last paint
+before deep sleep: by `prepare_for_sleep()` and after each fast-path paint.
+It is loaded at the start of the fast path, the button-wake boot, and a
+promoted interactive boot.
+
+`snapshot_from_display_values()` and `display_values_from_snapshot()` (host
+compatible, in `go_display.h`) convert in each direction. A frame built only
+from snapshot fields — every fast-path frame — round-trips exactly, which the
+retained-panel wake relies on.
 
 ```cpp
 struct RtcDisplaySnapshot {
@@ -100,19 +116,22 @@ struct RtcDisplaySnapshot {
   // Battery
   uint8_t battery_pct;  bool is_battery_charging;  bool is_plugged_in;
   // Status flags & rendering settings
-  bool gps_enabled;  bool gps_fix;  bool tracking_active;  bool ble_enabled;
+  bool locked;
+  bool gps_enabled;  bool gps_fix;  bool ble_enabled;
+  TrackingState tracking_state;
   bool use_fahrenheit;  bool use_feet;  bool pm_use_usaqi;
 };
 ```
 
-Estimated size: ~44 bytes (well within the ~50 B budget; total RTC usage
-~1.6 KB of the 8 KB available on ESP32-C5).
+Estimated size: ~46 bytes (within the ~50 B budget). The panel record below
+adds 8 bytes; total RTC usage stays ~1.6 KB of the 8 KB available on
+ESP32-C5.
 
 ### Free functions
 
 ```cpp
 // Save the last displayed state to RTC memory (go_display.cpp).
-// Called from prepare_for_sleep() after the final display update.
+// Called from prepare_for_sleep() and after each fast-path paint.
 void save_rtc_display_snapshot(const DisplayValues &values);
 
 // Load the snapshot saved before the last deep sleep.
@@ -144,6 +163,8 @@ hardware-dependent and excluded from host builds (stubs provided).
 | `MainMenu` | Home with menu overlay |
 | `Settings` / `SettingsChoice` / `TagList` / `About` / `Confirm` | Full-screen lists |
 | `ShutdownUser` | Goodbye screen for user long-press shutdown ("Powered off" / "Hold button" / "to turn on") |
+| `ShutdownCharging` | Charging-only boot page: battery-and-bolt icon, "Charging" / "Hold power button" / "to turn on" |
+| `ShutdownCharged` | Charge-complete page: filled-battery icon, "Battery Full" / "Hold power button" / "to turn on" |
 | `ShutdownDischarge` | Safety-trip shutdown for OverDischarge ("Battery critically low" / "Connect charger" / "Charge before use") |
 | `ShutdownTemperature` | High-temperature safety shutdown ("Battery overheated" / "Move device to a" / "cooler location") |
 | `ShutdownTemperatureLow` | Low-temperature safety shutdown ("Battery too cold" / "Move device to a" / "warmer location") |
@@ -183,7 +204,8 @@ Key points:
 - `provisioning_confirm_index` (`uint8_t`): `0` No (default), `1` Yes
 - `provisioning_ap_ssid` (`const char *`): captive-portal AP SSID (`airgradient-<MAC>`) rendered as the Wi-Fi instruction line
 - `provisioning_ap_password` (`const char *`): captive-portal AP password rendered as the Wi-Fi instruction line (sourced from `UIManager::Config::ap_password`, matches `WifiService::Config::ap_password`)
-- `qr` (`const AirgradientProvisioning::QrCode *`): borrowed pointer to the QR matrix shown on the session screens that render one — the Provisioning page (UIManager re-encodes on session entry and transport switch: BleOnly → companion-app URL, WifiOnly → `WIFI:` join descriptor) and the Getting Started page (setup landing-page URL). Those screens are mutually exclusive, so one pointer serves both. Null or empty matrix skips the QR area
+- `qr` (`const AirgradientProvisioning::QrCode *`): borrowed pointer to the QR matrix shown on the session screens that render one — the Provisioning page (UIManager re-encodes on session entry and transport switch: BleOnly → companion-app URL, WifiOnly → `WIFI:` join descriptor) and the Getting Started page (usage-guide URL, captioned `Scan for guide`). Those screens are mutually exclusive, so one pointer serves both. Null or empty matrix skips the QR area
+- `getting_started_from_boot` (`bool`): renders one bold `Hold Enter to start` line centered inside the first-boot guide's highlighted action, retaining `Or just use it right now` above it. No hold duration is displayed; Settings → Setup Guide keeps its single-line `Back` action
 
 ## Architecture
 
@@ -235,9 +257,10 @@ The SSD1680 display driver is file-local (anonymous namespace in
 - `driver_init()` — GPIO setup, SPI device attachment, DMA bounce buffer
 - `driver_hw_init_full()` — Full SSD1680 init (SW reset, gate config, RAM window)
 - `driver_set_basemap()` — Write frame to both RAM planes + full update trigger (`0xF7`)
-- `driver_hw_init_fast()` — Fast refresh init: SW reset + temperature override trick (forces 100 °C OTP LUT for faster waveform)
+- `driver_write_previous_plane()` — Write frame to RAM 0x26 only (basemap restore after deep sleep)
+- `driver_hw_init_fast()` — Fast refresh init: SW reset + temperature override trick (forces 100 °C OTP LUT for faster waveform) + border waveform matching the Full init
 - `driver_fast_write()` — Write full frame to both RAM planes (basemap coherence for subsequent partials)
-- `driver_fast_commit()` — Trigger fast update (`0xC7` waveform, non-differential, no flash)
+- `driver_fast_commit()` — Trigger fast update (`0xC7` waveform, non-differential, single inversion)
 - `driver_part_begin/write_region/commit()` — Partial update protocol (`0xFF` waveform, differential)
 - `driver_deep_sleep()` — SSD1680 deep sleep mode 1
 - `driver_bus_acquire/release()` — Exclusive SPI bus access
@@ -250,11 +273,16 @@ full design rationale.
 
 ### RefreshMode Enum
 
+`RefreshMode` and the pure decision functions (`select_refresh()`,
+`select_boot_refresh()`, `frame_hash()`) live in
+`products/go/main/go_display_refresh.h` so the policy is host-tested
+(`products/go/tests/go_display_refresh.tests.cpp`).
+
 ```cpp
 enum class RefreshMode : uint8_t {
-    Full,     ///< Full GC waveform (flash). Resets basemap in both RAM planes.
-    Fast,     ///< Full-screen 0xC7 waveform (no flash). Temperature-override trick.
-    Partial,  ///< Body-only differential 0xFF (no flash). Writes body region only.
+  Full,    ///< Full GC waveform (multi-flash). Resets basemap in both RAM planes.
+  Fast,    ///< Full-screen 0xC7 waveform (100 °C LUT). Shorter, but still inverts once.
+  Partial, ///< Differential 0xFF waveform (no flash). Body-only or full-canvas span.
 };
 ```
 
@@ -262,68 +290,136 @@ enum class RefreshMode : uint8_t {
 
 | Tier | SSD1680 Waveform | Duration | Flash | When |
 |---|---|---|---|---|
-| **Full** | `0xF7` (GC, both RAM planes) | ~2–3 s | Yes | Init from deep sleep; anti-ghosting after 20 differential ops |
-| **Fast** | `0xC7` (non-differential, 100 °C OTP LUT) | ~1–1.5 s | No | Transitions to/from PairingPasskey or any `Shutdown*` screen; navigable screen transitions with header change |
-| **Partial** | `0xFF` (differential, body region only) | ~0.3–0.5 s | No | Menu navigation between navigable screens (header unchanged); same list screen updates |
+| **Full** | `0xF7` (GC, both RAM planes) | ~2–3 s | Yes (multiple) | Cold boot and wakes where the panel content is unknown; setup-session boundary; every sixth ghosting cleanup |
+| **Fast** | `0xC7` (display mode 1, 100 °C OTP LUT) | ~1–1.5 s | Yes (single inversion) | Ghosting cleanup (on lock, or at the Partial cap); transitions to/from PairingPasskey or any `Shutdown*` screen |
+| **Partial** | `0xFF` (differential; body-only or full canvas) | ~0.3–0.5 s | No | Everything while unlocked, including status-bar changes and leaving menus; setup-session updates; wakes with a verified retained panel |
+
+The `0xC7` trigger runs display mode 1, the same GC waveform family as Full;
+the 100 °C LUT shortens it but does not remove the inversion. Only Partial
+avoids a visible flash, so status-bar changes (lock, plug-in, charging,
+connectivity) use a full-canvas Partial rather than Fast.
 
 ### Decision Logic
 
 The `update()` method selects the refresh mode using this priority:
 
 1. **Full** — crossing the setup-session boundary (any non-session screen
-   ↔ `Info` / `Provisioning` / `ProvisioningConfirm`). Resets
-   `_diff_count` and `_menu_exited` so the next session starts with a
-   fresh partial budget.
+   ↔ `Info` / `Provisioning` / `ProvisioningConfirm`). The Full resets
+   both cleanup counters.
 2. **Partial** — in-session transition (both previous and next are
-   session screens). The partial-op counter is **not** consulted inside
+   session screens). The cleanup counters are **not** consulted inside
    the session. Covers `Info` text updates, Provisioning status updates,
    `Provisioning ↔ ProvisioningConfirm`, and No ↔ Yes toggling.
-3. **Partial** — menu-navigation transition (either previous or next is
+3. **Cleanup** — `request_cleanup()` was called (the device is locking)
+   and `_partial_count >= lock_cleanup_min_ops`.
+4. **Partial** — menu-navigation transition (either previous or next is
    a menu-navigation screen, and the next screen is not a `Shutdown*`
-   variant or PairingPasskey)
-4. **Full** — `_diff_count >= max_partial_ops` (anti-ghosting, default 20)
-5. **Fast** — `_menu_exited` is set (post-menu cleanup)
-6. **Partial** — both screens "navigable" and header unchanged, OR same
-   list screen
-7. **Fast** — everything else (fallback)
+   variant or PairingPasskey). Full canvas when the status bar changed.
+5. **Cleanup** — `_partial_count >= max_partial_ops` (the device has not
+   locked for a long time).
+6. **Partial** — both screens "navigable". Full canvas when the status bar
+   changed, body-only otherwise.
+7. **Fast** — everything else (system-screen transitions)
+
+A **cleanup** is Fast, or Full once `_fast_count >= max_fast_cleanups`.
+
+A Partial whose rendered frame hashes identically to the panel content is
+skipped entirely: no SPI traffic, and it does not count toward the cleanup
+cap. Periodic repaints with unchanged readings therefore cost nothing.
 
 A screen is **navigable** if the user reaches it through normal menu
-interaction: Home, MainMenu, Settings, SettingsChoice, TagList, Confirm,
-About. PairingPasskey and the `Shutdown*` variants are not navigable —
-transitions involving them always use Fast for clear visual indication.
+interaction: Home and the menu/list screens, including tracking
+(TrackingMenu, TrackingStatus), settings, and diagnostics. PairingPasskey and
+the `Shutdown*` variants are not navigable — transitions involving them
+always use Fast for clear visual indication.
 
-A screen is **menu-navigation** if it is navigable and not Home (MainMenu,
-Settings, SettingsChoice, TagList, Confirm, About). Transitions where either
-side is a menu-navigation screen force body-only Partial regardless of header
-changes or anti-ghosting counter. This keeps menu interaction responsive and
-flash-free. The anti-ghosting Full refresh is deferred, not skipped.
+A screen is **menu-navigation** if it is navigable and not Home. Transitions where either
+side is a menu-navigation screen force Partial regardless of header changes
+or the Partial cap. This keeps menu interaction responsive and flash-free.
+The cap cleanup is deferred, not skipped. Leaving a menu is an ordinary
+Partial; menu ghosting is cleaned up when the device next locks.
 
-`_menu_exited` is set during any menu-navigation Partial and cleared when a
-full-screen refresh (Full or Fast) executes. After the user leaves the menu,
-the first non-menu update triggers Fast (or Full if the anti-ghosting
-threshold was reached during the menu session) to clean up accumulated
-artifacts and refresh the status bar.
+TrackingStatus repaints every 5 s. As a menu-navigation screen its repaints
+are flash-free Partials, the cap cleanup is deferred while it is open, and a
+changed status bar is repainted with a full-canvas Partial rather than a Fast.
 
-All non-`Shutdown*` screens share the same status bar at Y=0..17. Partial
-updates write the body region only (Y=18..249, 232 px height, full 128 px
-width), so the status bar is physically unchanged on the display. Header
-changes during menu navigation and same-list-screen interactions are silently
-deferred; the header self-corrects at the post-menu cleanup refresh or the
-next Full refresh (anti-ghosting).
+### Status-Bar Change Detection
 
-### Anti-Ghosting Counter
+All navigable screens share the same status bar at Y=0..17. `DisplayService`
+keeps `_panel_header`, a copy of the status-bar rows (288 bytes) as last
+written to the panel. Every refresh that writes those rows (Full, Fast, or a
+full-canvas Partial) latches it from the render buffer. `update()` compares
+the newly rendered rows against `_panel_header`:
 
-`_diff_count` counts all differential operations (both Fast and Partial).
-Both waveform types accumulate ghosting equally on the GDEY0213B74 panel.
-The counter resets to 0 on Full refresh and uses saturating increment on Fast
-or Partial (capped at `UINT8_MAX` to prevent wrap during long menu sessions).
-`Config::max_partial_ops` (default 20) controls the limit.
+- **Unchanged:** the Partial writes the body region only (Y=18..249, 232 px
+  height, full 128 px width), leaving the status bar physically untouched.
+- **Changed:** the Partial writes the full canvas (Y=0..249) so the header
+  updates in the same flash-free refresh.
 
-During menu navigation, the anti-ghosting threshold may be reached or
-exceeded, but the menu-navigation rule (tier 1) overrides it. The counter
-keeps incrementing. When a later non-menu update runs, `_diff_count >=
-max_partial_ops` (tier 2) promotes it to Full — an even stronger cleanup
-than the Fast from `_menu_exited`.
+Comparing pixels rather than `DisplayValues` fields means state that does not
+change the rendered header does not count as a change: battery percentage
+within one glyph bucket, any percentage while the charging bolt is shown,
+`gps_enabled` (never drawn), or the link state of a hidden radio icon.
+
+After a button wake, `_panel_header` holds the RTC-snapshot header painted
+by the deferred init. The first live update therefore repaints any header
+fields the snapshot does not carry (for example the plug icon) with a
+full-canvas Partial instead of leaving them stale.
+
+### Ghosting Cleanup
+
+Partial refreshes push only changed pixels, one way, with a short waveform,
+so faint residual images and DC imbalance accumulate. A GC waveform (Fast
+or Full) drives every pixel both ways and clears them. The cleanup policy
+(`go_display_refresh::CleanupPolicy`) schedules these flashing refreshes
+for when the user is unlikely to be looking:
+
+- **On lock.** `Orchestrator::lock()` (manual or inactivity) calls
+  `request_cleanup()`. The lock frame runs a cleanup if at least
+  `lock_cleanup_min_ops` Partials ran since the last Fast/Full.
+- **At the cap.** A device that never locks gets a cleanup after
+  `max_partial_ops` Partials (about 10 minutes at the default 10 s
+  measurement interval). The cap is deferred while in menus.
+- **Escalation.** A cleanup is Fast (one inversion). After
+  `max_fast_cleanups` Fasts the next cleanup is a Full, in case the
+  temperature-override Fast clears ghosting less completely than Full.
+
+Two saturating counters track the cadence. The worker updates both after
+each refresh, and they persist across deep sleep in the RTC panel record:
+
+| Counter | Incremented by | Reset by |
+|---|---|---|
+| `_partial_count` | Partial | Fast, Full |
+| `_fast_count` | Fast | Full |
+
+The thresholds are first estimates. If ghosting is visible before a
+cleanup, lower `max_partial_ops`; if lock flashes feel too frequent, raise
+`lock_cleanup_min_ops`.
+
+### Retained Panel After Deep Sleep
+
+E-paper keeps its image without power, so after deep sleep the panel still
+shows the last frame. A Partial needs that frame in the controller's
+previous-image RAM (0x26), which cannot be read back over this bus.
+`DisplayService` instead verifies it:
+
+1. After every successful refresh, `_paint()` stores the frame's FNV-1a hash
+   and both cleanup counters in an RTC record (`s_rtc_panel_record`).
+   A failed refresh invalidates the record.
+2. On wake, the caller passes `painted`, rebuilt from the RTC snapshot.
+   `init()` renders it and compares its hash with the record.
+3. **Match:** `init()` writes the painted frame into RAM 0x26
+   (`driver_write_previous_plane()`), then runs a full-canvas Partial
+   (or a cleanup if the restored `_partial_count` reached the cap).
+   **No match** (first power-on, a frame built from fields the snapshot
+   does not carry, firmware changed rendering): Full, as before.
+
+The fast path (Offline or Portable Sleep, locked, timer wake) saves its frame to the
+snapshot after painting, so consecutive measurement wakes verify and
+update flash-free. A button wake verifies when the last paint was a
+fast-path frame or a locked Home that used only snapshot fields.
+`init()` logs the outcome (`init refresh: Partial (painted=1 retained=1
+...)`), and every Fast and Full refresh is logged.
 
 ### Fast Refresh: Temperature Override
 
@@ -343,23 +439,38 @@ Writing both RAM planes ensures that after a Fast refresh, the basemap
 (RAM 0x26) matches the displayed content. Subsequent Partial refreshes
 (which diff 0x24 vs 0x26) produce correct results.
 
+### Border Waveform
+
+The border is the ink ring outside the active pixel area, driven by its own
+electrode and configured by command `0x3C`. Every init path sets it
+explicitly; a SW reset otherwise leaves the POR default (`0xC0`, HiZ), and a
+floating border drifts with stray fields from nearby pixels.
+
+| Path | `0x3C` value | Border behavior |
+|---|---|---|
+| Full (`driver_hw_init_full`) | `BORDER_WAVEFORM_FULL` (`0x05`) | Follows LUT1, ends white |
+| Fast (`driver_hw_init_fast`) | `BORDER_WAVEFORM_FULL` (`0x05`) | Follows LUT1, ends white |
+| Partial (`driver_part_begin`) | `BORDER_WAVEFORM_PARTIAL` (`0x80`) | Held at VCOM, unchanged |
+
 ### Decision Matrix
 
 | Condition | Refresh Mode |
 |---|---|
 | Crossing the setup-session boundary (non-session ↔ Info / Provisioning / ProvisioningConfirm) | Full |
 | In-session transition (Info ↔ Provisioning ↔ ProvisioningConfirm, including same-screen text updates) | Partial |
+| Lock with `partial_count >= lock_cleanup_min_ops` (including from a menu) | Cleanup (Fast; Full every sixth) |
+| Lock with fewer Partials | Partial |
 | Menu-navigation transition (prev or next is menu-nav screen) | Partial |
-| Menu-navigation transition, even if `diff_count >= max_partial_ops` | Partial |
-| Menu-navigation transition with header change | Partial |
-| Transition **to** any `Shutdown*` variant or PairingPasskey from menu | Fast/Full (existing) |
-| `diff_count >= max_partial_ops` (non-menu, non-session) | Full |
-| Post-menu cleanup (`_menu_exited` set, non-menu update) | Fast |
-| Both navigable, header unchanged (non-menu, non-session) | Partial |
-| Same list screen (any header state) | Partial |
+| Menu-navigation transition, even if `partial_count >= max_partial_ops` | Partial |
+| Menu-navigation transition with header change | Partial (full canvas) |
+| Transition **to** any `Shutdown*` variant or PairingPasskey from menu | Fast |
+| `partial_count >= max_partial_ops` (non-menu, non-session) | Cleanup (Fast; Full every sixth) |
+| Leaving a menu | Partial |
+| Both navigable, header unchanged (non-menu, non-session) | Partial (body-only) |
+| Both navigable, header changed (non-menu, non-session) | Partial (full canvas) |
 | Screen transition involving PairingPasskey (non-menu) | Fast |
 | Screen transition involving any `Shutdown*` variant (non-menu) | Fast |
-| Navigable screen transition, header changed (non-menu, non-session) | Fast |
+| Any Partial whose frame is identical to the panel | Skipped |
 
 ### Setup Session Refresh Policy
 
@@ -370,12 +481,12 @@ rules layered on top of the general matrix:
 - **Crossing the session boundary in either direction forces Full.**
   Any non-session screen entering a session screen, or any session
   screen returning to Home / Portable, runs a full GC waveform. This
-  prevents the prior layout from ghosting under the new one. The
-  partial-op counter and `_menu_exited` flag are reset at the boundary.
+  prevents the prior layout from ghosting under the new one. The Full
+  resets both cleanup counters.
 - **All intra-session transitions are Partial, regardless of layout
   change.** This includes `Info` text updates
-  (`Connecting to saved Wi-Fi...` → `Trying default Wi-Fi...` →
-  `Connected!\n<ip>`), Provisioning status updates, the
+  (`Connecting to saved Wi-Fi...` or manufacturing's `Trying default Wi-Fi...`
+  → `Connected!\n<ip>` or a connection-failure message), Provisioning status updates, the
   `Provisioning ↔ ProvisioningConfirm` overlay, the No ↔ Yes toggle in
   the confirmation overlay, and the in-session `Info → Provisioning`
   jump. The partial worker writes the **full canvas** (y = 0..249) for
@@ -383,10 +494,10 @@ rules layered on top of the general matrix:
   text block versus Provisioning's full-canvas QR layout) clear
   cleanly without falling back to the Full waveform's ~3 s flash.
 
-Non-session partials still write only the body region (y = 18..249,
-232 px tall) to preserve the status bar without rewriting it. The
-selection between body-only and full-canvas partial happens in the
-worker loop based on `is_session_screen(_prev_values.screen)`.
+Non-session partials write only the body region (y = 18..249, 232 px
+tall) unless the status bar changed. `update()` records the span in
+`_pending_full_canvas`, which the worker loop passes to
+`go_display_geometry::partial_region()`.
 
 ### Session-Screen Drawing
 
@@ -417,8 +528,9 @@ Session screens skip `_draw_status_bar()` and `_draw_snackbar()`:
 
 Background display updates are suppressed in two cases:
 
-- **Menu-navigation screens** (MainMenu, Settings, SettingsChoice,
-  TagList, Confirm, About). Background events — sensor data, BLE
+- **Menu-navigation screens** (MainMenu, Settings, Operations, DisplayTouch,
+  SettingsChoice, TagList, Confirm, About, and diagnostic menus/screens).
+  Background events — sensor data, BLE
   connect/disconnect/auth/config writes, BMS charging-status changes,
   and snackbar expiry — do not trigger display updates while the user
   is interacting with a menu.
@@ -438,6 +550,13 @@ internally and pushed to BLE clients; only the e-paper refresh is
 suppressed. The display catches up on the next user-initiated repaint
 or on the next deliberate session render. See `docs/orchestrator.md`
 for the full call-site classification.
+
+Shake-refresh progress is an explicit user-requested update. The orchestrator's
+`update_refresh_display()` submits it with `wait=true` on Home and menus so
+progress text can change and clear while a menu is open. It still skips active
+setup sessions and the pairing focus screen. Snackbar text and persistence
+belong to the orchestrator and UI Manager; Display Service only renders the
+supplied values and selects the normal refresh tier.
 
 ## Rendering Pipeline
 
@@ -459,24 +578,40 @@ Screen dispatch:
   directly by `FgLearningRunner` (no `UIManager`). See
   [`fg_learning.md`](fg_learning.md).
 - **Home:** Hero blocks (PM2.5, CO2 with dual-font labels centered via
-  `u8g2_GetStrWidth()`) + 3-row grid (Temp/Humidity, TVOC/NOx or
-  Min/Max, Pressure/Altitude or chart). Grid dividers span full 128 px;
-  1st divider is always 2 px thick, 3rd is 2 px thick when chart is
-  visible. Selection rects for PM2.5, CO2, Temp, and Humidity use full
-  128 px width. Logo removed from home page (kept for display-off only).
+  `u8g2_GetStrWidth()`) + 3-row grid (Temp/Humidity, TVOC/NOx,
+  Pressure/Altitude). Grid dividers span full 128 px; the 1st divider is
+  always 2 px thick. Selecting any metric (PM2.5, CO2, Temperature, Humidity,
+  TVOC, NOx, Pressure, Altitude) replaces all three grid rows with a chart
+  panel: an inverted title band (y=164..180) with the metric name (PM2.5 and
+  CO2 include their unit, `(ug/m3)`/`(USAQI)` and `(ppm)`) and current value,
+  a Min/Max line (values without units; the title carries the unit), a 40 px
+  plot (y=199..238), and a time axis at baseline y=248: the oldest plotted
+  sample's age on the left (up to `-4h`) and the newest on the right (`now`
+  under one minute, else `-2h`). The hero blocks stay as they are. With no
+  plottable samples the panel shows "No history yet". Spans render as `48s`,
+  `15m`, or `4h`. Time labels are omitted when the clock is unknown. The
+  polyline interpolates between samples and breaks at NaN gaps.
+  Logo removed from home page (kept for display-off only).
 - **MainMenu:** Home screen (metric cleared to None) + overlay at y=162.
   The 2 px-thick 1st grid divider is preserved as the menu top border.
-  Menu rows use full 128 px-wide selection rects.
-- **Settings/SettingsChoice/TagList/Confirm/About:** Full-screen list with
+  Menu rows use full 128 px-wide selection rects. The four rows are Exit Menu,
+  Start Tracking (Idle) / Tracking (Recording or Paused), Operating Mode, and Settings.
+- **TrackingMenu/TrackingStatus/Settings/Operations/DisplayTouch/SettingsChoice/TagList/Confirm/About:** Full-screen list with
   full 128 px-wide selection rects and vertically centered text. A
   separator line between the header rows (Exit/Back) and content rows
   uses a 2 px content offset to avoid touching.
+- **TrackingMenu:** Exit, Back, Status, Pause Tracking / Resume Tracking, and Stop
+  Tracking. Status is selected on entry.
+- **TrackingStatus:** Session and GPS views use nine rows of at most 19 characters,
+  above the snackbar. Only Exit, Back, and the view switch are selectable.
+  Updates are always body-only Partial (Y=18..249), leaving the top bar unchanged;
+  cleanup resumes after exit. See [Tracking Status](ui_manager.md#tracking-status).
 - **PairingPasskey:** "Bluetooth Pairing" title (`helvB14_tf`, baseline
   y=35), 3 px-thick divider at y=49 (shared chrome with `Shutdown*`),
   6-digit passkey (`logisoso32_tr`, baseline y=145), and "Enter on
   phone" hint (`helvR12_tr`, baseline y=215). No status bar, no
   snackbar.
-- **ShutdownUser / ShutdownDischarge / ShutdownTemperature /
+- **ShutdownUser / ShutdownCharging / ShutdownCharged / ShutdownDischarge / ShutdownTemperature /
   ShutdownTemperatureLow:** Unified template — `"AirGradient"` brand header
   (`helvB14_tf`, baseline y=34),
   3 px-thick divider at y=49, reason-specific icon centred at
@@ -486,7 +621,12 @@ Screen dispatch:
   (power circle, battery body, thermometer with heat-wave lines). No
   status bar, no snackbar. The renderer dispatches on the Screen
   variant. The temperature icons use heat-wave lines for high temperature and
-  a snowflake for low temperature.
+  a snowflake for low temperature. `ShutdownCharging` uses a static battery
+  outline and filled lightning bolt drawn with u8g2 primitives. It has no
+  percentage or animation. `ShutdownCharged` fills the battery outline and
+  shows "Battery Full". The display sleeps after painting and refreshes only
+  when charging completes or resumes. On unplug, the charging-only
+  runner wakes the display for a full `ShutdownUser` refresh before shutdown.
 
 ### Fonts
 
@@ -509,8 +649,8 @@ The Wi-Fi icon is shown for the whole Stationary session (`wifi_enabled`
 = Stationary mode), so a dropped link stays visible instead of vanishing.
 `wifi_connected` (`WifiService::is_online()`) selects the glyph: connected
 (57419) when online, disconnected (57879) otherwise. In Portable mode the
-icon is hidden. `_is_header_changed()` includes `wifi_connected` so the
-connect/disconnect transition triggers a status-bar redraw.
+icon is hidden. The glyph swap changes the rendered status bar, so the
+connect/disconnect transition repaints it with a full-canvas Partial.
 
 ### Status Bar — Battery and Plug Icons
 
@@ -527,11 +667,13 @@ The plug icon appears left of the battery glyph when
 `is_plugged_in && !is_battery_charging` (full-charge pause or charge
 termination done while USB is connected).
 
-When the plug icon is visible and tracking is active, the tracking dot
-shifts left to avoid overlapping the plug glyph.
+Recording shows a dot; Paused shows two bars in the same position; Idle shows
+neither. When the plug icon is visible, either tracking indicator shifts left
+to avoid overlapping it. The tracking enum is retained in the RTC snapshot so
+the pause indicator survives deep sleep.
 
-`_is_header_changed()` includes `is_plugged_in` so plug/unplug
-transitions trigger a status bar redraw.
+Plug/unplug transitions change the rendered status bar, so they repaint it
+with a full-canvas Partial (no flash).
 
 ### Value Formatting
 

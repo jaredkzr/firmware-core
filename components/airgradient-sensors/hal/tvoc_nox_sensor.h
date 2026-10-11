@@ -34,6 +34,12 @@ public:
     (void)humidity_pct;
   }
 
+  /// Switch the hotplate off and leave the sensor idle before a cold ESP deep
+  /// sleep. The next conditioning or read command re-heats it. Default no-op
+  /// that succeeds, for sensors without a heater. Returns false only when the
+  /// heater-off command failed.
+  virtual bool heater_off() { return true; }
+
 private:
 };
 

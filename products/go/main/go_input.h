@@ -60,7 +60,10 @@ public:
   /// Returns true if the task was created successfully.
   bool start();
 
-  /// Stop the task and unregister ISR handlers.
+  /// Stop the task, unregister ISR handlers, and put the touch controller in
+  /// deep sleep (CapTouchSensor::deep_sleep()). Call only before ESP deep
+  /// sleep; touch input stays dead until the touch sensor's init() runs on
+  /// the next boot.
   void stop();
 
   /// Suppress all input event posting. Thread-safe: called from the

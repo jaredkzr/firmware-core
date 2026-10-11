@@ -6,6 +6,21 @@
 #include "go_types.h"
 #include "gps/gps_types.h"
 #include "measures_types.h"
+#include "rtos.h"
+
+class BleService;
+class OtaService;
+class PortableWifiProvisioner;
+class StorageService;
+
+/// Portable BLE services a boot path started before the orchestrator exists.
+/// They post to `event_queue`, which the orchestrator then adopts.
+struct PortableBle {
+  RtosQueueHandle event_queue = nullptr;
+  BleService *ble = nullptr;
+  OtaService *ota = nullptr;
+  PortableWifiProvisioner *provisioner = nullptr;
+};
 
 class GoApp {
 public:
@@ -17,9 +32,21 @@ public:
 
 private:
   // --- Boot paths ---
+  bool detect_charging_only_boot(BmsStatus &status, bool requested = false);
+  void run_charging_only(const BmsStatus &initial_status);
   void run_fast_path(const RtcAppState &state);
   void run_button_wake_path(const RtcAppState &state);
   void run_interactive(WakeCause cause, BootHandoff handoff);
+
+  /// Connect-window wake during Portable Sleep: advertise for
+  /// BLE_WINDOW_ADVERTISE_MS, then promote to interactive if a phone
+  /// connected or the button was pressed, or go back to sleep.
+  void run_ble_window_path(const RtcAppState &state);
+
+  /// Construct the Portable BLE services and start advertising. Returns null
+  /// (nothing advertising) on failure. @p storage may still be unmounted;
+  /// BleService only reads it when the phone asks for history.
+  PortableBle *start_portable_ble(StorageService &storage);
 
   /// Dedicated factory fuel-gauge learning path. Entered from run() before
   /// select_boot_path() when a learning run is armed/resumed. Brings up the
@@ -37,8 +64,10 @@ private:
     BootHandoff handoff;
     MeasuresAGo measures;
     bool has_measures;
-    uint32_t sleep_duration_ms; ///< Valid when outcome == Sleep
-    bool sensors_warm;          ///< RTC persistence before sleep
+    uint32_t sleep_duration_ms;     ///< Valid when outcome == Sleep
+    bool sensors_warm;              ///< RTC persistence before sleep
+    TrackingTiming tracking_timing; ///< Updated timing only; caller owns RTC state
+    bool ble_windows = false;       ///< Valid when outcome == Sleep: split into connect windows
   };
 
   FastPathResult execute_fast_path(const RtcAppState &state, const volatile bool &button_flag,
@@ -55,9 +84,11 @@ private:
 // Boot path selection
 // ---------------------------------------------------------------------------
 
-enum class BootPath { FastPath, ButtonWake, Interactive };
+enum class BootPath { FastPath, BleWindow, ButtonWake, Interactive, ChargingOnly };
 
-BootPath select_boot_path(WakeCause cause, const RtcAppState &state);
+/// @param ble_window_due  PowerService::is_ble_window_wake() for this boot.
+BootPath select_boot_path(WakeCause cause, const RtcAppState &state, bool charging_only_eligible,
+                          bool ble_window_due = false);
 
 // ---------------------------------------------------------------------------
 // Pure utility functions
@@ -69,7 +100,7 @@ MeasuresAGo measures_to_ago(const Measures &m);
 /// Build DisplayValues for the fast-path locked dashboard.
 DisplayValues build_fast_path_display(const MeasuresAGo &measures, const GpsData &gps,
                                       const PowerSnapshot &bms, const GoSettings &settings,
-                                      bool tracking_active);
+                                      TrackingState tracking_state);
 
 /// Build DisplayValues for button-wake early paint (snapshot-based).
 DisplayValues build_wake_values(const RtcDisplaySnapshot &snapshot, bool snapshot_valid);

@@ -44,6 +44,7 @@ public:
   IMPLEMENT_MOCK0(is_baseline_calibration_done);
   IMPLEMENT_CONST_MOCK0(supports_abc_period_configuration);
   IMPLEMENT_MOCK1(set_abc_period_days);
+  IMPLEMENT_MOCK0(stop_measurement);
 };
 
 class MockO3No2Sensor : public trompeloeil::mock_interface<O3No2Sensor> {
@@ -68,6 +69,7 @@ public:
   IMPLEMENT_MOCK1(read);
   IMPLEMENT_MOCK0(run_conditioning);
   IMPLEMENT_MOCK2(set_compensation);
+  IMPLEMENT_MOCK0(heater_off);
 };
 
 class MockPressureSensor : public trompeloeil::mock_interface<PressureSensor> {
@@ -76,6 +78,7 @@ public:
   IMPLEMENT_MOCK1(read);
   IMPLEMENT_CONST_MOCK0(supports_temp_hum);
   IMPLEMENT_MOCK0(temp_hum_data);
+  IMPLEMENT_MOCK0(standby);
 };
 
 class MockRTOS : public trompeloeil::mock_interface<RTOS> {
@@ -1955,6 +1958,106 @@ TEST_CASE("PM sleep/wake forwarding", "[SensorManager]") {
 }
 
 // ===========================================================================
+// Idle-for-sleep tests
+// ===========================================================================
+
+// Minimal HAL implementations that inherit the default idle hooks.
+class DefaultIdleCO2Sensor : public CO2Sensor {
+public:
+  bool init() override { return true; }
+  bool read(CO2Data &) override { return false; }
+  TempHumData temp_hum_data() override { return {}; }
+};
+
+class DefaultIdleTVOCNOxSensor : public TVOCNOxSensor {
+public:
+  bool init() override { return true; }
+  bool read(TVOCNOxData &) override { return false; }
+};
+
+class DefaultIdlePressureSensor : public PressureSensor {
+public:
+  bool init() override { return true; }
+  bool read(PressureData &) override { return false; }
+  TempHumData temp_hum_data() override { return {}; }
+};
+
+TEST_CASE("Idle for sleep", "[SensorManager]") {
+  MockCO2Sensor mock_co2;
+  MockTVOCNOxSensor mock_tvoc_nox;
+  MockPressureSensor mock_pressure;
+  MockPMSensor mock_pm_a;
+  MockPMSensor mock_pm_b;
+
+  SECTION("idles CO2, TVOC/NOx, and pressure without touching PM sensors") {
+    Sensors sensors{};
+    sensors.co2 = &mock_co2;
+    sensors.tvoc_nox = &mock_tvoc_nox;
+    sensors.pressure = &mock_pressure;
+    sensors.pms_a = &mock_pm_a;
+    sensors.pms_b = &mock_pm_b;
+    SensorManager manager(sensors);
+
+    REQUIRE_CALL(mock_co2, stop_measurement()).RETURN(true);
+    REQUIRE_CALL(mock_tvoc_nox, heater_off()).RETURN(true);
+    REQUIRE_CALL(mock_pressure, standby()).RETURN(true);
+    FORBID_CALL(mock_pm_a, sleep());
+    FORBID_CALL(mock_pm_b, sleep());
+    manager.idle_for_sleep();
+  }
+
+  SECTION("a failing sensor does not stop the others") {
+    Sensors sensors{};
+    sensors.co2 = &mock_co2;
+    sensors.tvoc_nox = &mock_tvoc_nox;
+    sensors.pressure = &mock_pressure;
+    SensorManager manager(sensors);
+
+    REQUIRE_CALL(mock_co2, stop_measurement()).RETURN(false);
+    REQUIRE_CALL(mock_tvoc_nox, heater_off()).RETURN(false);
+    REQUIRE_CALL(mock_pressure, standby()).RETURN(false);
+    manager.idle_for_sleep();
+  }
+
+  SECTION("skips missing sensors") {
+    Sensors sensors{};
+    sensors.tvoc_nox = &mock_tvoc_nox;
+    SensorManager manager(sensors);
+
+    REQUIRE_CALL(mock_tvoc_nox, heater_off()).RETURN(true);
+    FORBID_CALL(mock_co2, stop_measurement());
+    FORBID_CALL(mock_pressure, standby());
+    manager.idle_for_sleep();
+  }
+
+  SECTION("no-op when no sensors are wired") {
+    Sensors sensors{};
+    SensorManager manager(sensors);
+
+    FORBID_CALL(mock_co2, stop_measurement());
+    FORBID_CALL(mock_tvoc_nox, heater_off());
+    FORBID_CALL(mock_pressure, standby());
+    manager.idle_for_sleep();
+  }
+
+  SECTION("HAL defaults succeed without hardware access") {
+    DefaultIdleCO2Sensor co2;
+    DefaultIdleTVOCNOxSensor tvoc_nox;
+    DefaultIdlePressureSensor pressure;
+    CHECK(co2.stop_measurement());
+    CHECK(tvoc_nox.heater_off());
+    CHECK(pressure.standby());
+
+    Sensors sensors{};
+    sensors.co2 = &co2;
+    sensors.tvoc_nox = &tvoc_nox;
+    sensors.pressure = &pressure;
+    SensorManager manager(sensors);
+    manager.idle_for_sleep();
+  }
+}
+
+// ===========================================================================
 // Gas-index algorithm hosting tests
 // ===========================================================================
 
@@ -2149,6 +2252,108 @@ TEST_CASE("Gas index algorithm", "[SensorManager]") {
     // Index fields remain at invalid sentinels (driver sets them to -1)
     REQUIRE(result.tvoc_nox.tvoc_index == MeasuresInvalid::TVOC);
     REQUIRE(result.tvoc_nox.nox_index == MeasuresInvalid::NOX);
+  }
+
+  SECTION("restored state skips the blackout and keeps the baseline") {
+    Sensors s{};
+    s.tvoc_nox = &mock_tvoc_nox;
+    SensorManager first(s);
+    REQUIRE(first.configure_tvoc_nox_index(10000));
+    for (int i = 0; i < 6; i++) {
+      EXPECT_READ(mock_tvoc_nox,
+                  (TVOCNOxData{MeasuresInvalid::TVOC, 25000, MeasuresInvalid::NOX, 18000}), true);
+      (void)first.start_measures(1, SensorGroup::TvocNox);
+    }
+    TvocNoxIndexState saved{};
+    REQUIRE(first.get_tvoc_nox_index_state(saved));
+
+    // A new manager (next boot) resumes with a 60 s gap between samples.
+    SensorManager next(s);
+    REQUIRE_FALSE(next.is_tvoc_nox_index_configured());
+    REQUIRE(next.restore_tvoc_nox_index(saved, 60000));
+    REQUIRE(next.is_tvoc_nox_index_configured());
+    EXPECT_READ(mock_tvoc_nox,
+                (TVOCNOxData{MeasuresInvalid::TVOC, 25000, MeasuresInvalid::NOX, 18000}), true);
+    auto result = next.start_measures(1, SensorGroup::TvocNox);
+    CHECK(result.tvoc_nox.tvoc_index >= 1);
+    CHECK(result.tvoc_nox.tvoc_index <= 500);
+    CHECK(result.tvoc_nox.nox_index >= 1);
+    CHECK(result.tvoc_nox.nox_index <= 500);
+
+    TvocNoxIndexState after{};
+    REQUIRE(next.get_tvoc_nox_index_state(after));
+    CHECK(after.voc.mSamplingInterval == 60.0f);
+    // The learning clock advanced by the real 60 s gap, not the 10 s cadence.
+    CHECK(after.voc.m_Mean_Variance_Estimator___Uptime_Gamma ==
+          saved.voc.m_Mean_Variance_Estimator___Uptime_Gamma + 60.0f);
+  }
+
+  SECTION("fresh algorithm at a duty-cycled interval reports after one blackout sample") {
+    Sensors s{};
+    s.tvoc_nox = &mock_tvoc_nox;
+    SensorManager mgr(s);
+    REQUIRE(mgr.configure_tvoc_nox_index(10000));
+    REQUIRE(mgr.set_tvoc_nox_sampling_interval(60000));
+
+    EXPECT_READ(mock_tvoc_nox,
+                (TVOCNOxData{MeasuresInvalid::TVOC, 25000, MeasuresInvalid::NOX, 18000}), true);
+    auto blackout = mgr.start_measures(1, SensorGroup::TvocNox);
+    CHECK(blackout.tvoc_nox.tvoc_index == MeasuresInvalid::TVOC);
+
+    EXPECT_READ(mock_tvoc_nox,
+                (TVOCNOxData{MeasuresInvalid::TVOC, 25000, MeasuresInvalid::NOX, 18000}), true);
+    auto result = mgr.start_measures(1, SensorGroup::TvocNox);
+    CHECK(result.tvoc_nox.tvoc_index >= 1);
+    CHECK(result.tvoc_nox.nox_index >= 1);
+  }
+
+  SECTION("retiming keeps state and matches a fresh algorithm's coefficients") {
+    Sensors s{};
+    s.tvoc_nox = &mock_tvoc_nox;
+    SensorManager mgr(s);
+    REQUIRE(mgr.configure_tvoc_nox_index(1000));
+    for (int i = 0; i < 3; i++) {
+      EXPECT_READ(mock_tvoc_nox,
+                  (TVOCNOxData{MeasuresInvalid::TVOC, 25000, MeasuresInvalid::NOX, 18000}), true);
+      (void)mgr.start_measures(1, SensorGroup::TvocNox);
+    }
+    TvocNoxIndexState before{};
+    REQUIRE(mgr.get_tvoc_nox_index_state(before));
+    REQUIRE(mgr.set_tvoc_nox_sampling_interval(10000));
+    TvocNoxIndexState after{};
+    REQUIRE(mgr.get_tvoc_nox_index_state(after));
+
+    GasIndexAlgorithmParams reference{};
+    GasIndexAlgorithm_init_with_sampling_interval(&reference, GasIndexAlgorithm_ALGORITHM_TYPE_VOC,
+                                                  10.0f);
+    CHECK(after.voc.mSamplingInterval == reference.mSamplingInterval);
+    CHECK(after.voc.m_Mean_Variance_Estimator___Gamma_Initial_Mean ==
+          reference.m_Mean_Variance_Estimator___Gamma_Initial_Mean);
+    CHECK(after.voc.m_Adaptive_Lowpass__A1 == reference.m_Adaptive_Lowpass__A1);
+    CHECK(after.voc.mUptime == before.voc.mUptime);
+    CHECK(after.voc.m_Mean_Variance_Estimator___Mean ==
+          before.voc.m_Mean_Variance_Estimator___Mean);
+    CHECK(after.voc.m_Adaptive_Lowpass___X1 == before.voc.m_Adaptive_Lowpass___X1);
+  }
+
+  SECTION("resume and retime reject invalid input") {
+    Sensors s{};
+    s.tvoc_nox = &mock_tvoc_nox;
+    SensorManager mgr(s);
+    TvocNoxIndexState state{};
+    CHECK_FALSE(mgr.get_tvoc_nox_index_state(state));
+    CHECK_FALSE(mgr.set_tvoc_nox_sampling_interval(60000));
+
+    REQUIRE(mgr.configure_tvoc_nox_index(10000));
+    REQUIRE(mgr.get_tvoc_nox_index_state(state));
+    SensorManager next(s);
+    CHECK_FALSE(next.restore_tvoc_nox_index(state, 500));
+    TvocNoxIndexState swapped{state.nox, state.voc};
+    CHECK_FALSE(next.restore_tvoc_nox_index(swapped, 60000));
+
+    Sensors none{};
+    SensorManager unwired(none);
+    CHECK_FALSE(unwired.restore_tvoc_nox_index(state, 60000));
   }
 
   SECTION("Invalid raw fields are not passed to algorithm") {

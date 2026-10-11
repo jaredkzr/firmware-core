@@ -140,6 +140,10 @@ struct GoBoard {
   virtual BmsDevice *bms() = 0;
   virtual SensorManager &sensors(bool warm = false) = 0;
   virtual StorageService &storage() = 0;
+  /// The same StorageService without mounting NAND yet, for a boot path that
+  /// only needs the object (BLE services built before the orchestrator).
+  /// storage() mounts it later. Defaults to storage().
+  virtual StorageService &storage_unmounted() { return storage(); }
   virtual DisplayService &display() = 0;
   virtual LedService &led_service() = 0;
   virtual BuzzerService &buzzer_service() = 0;

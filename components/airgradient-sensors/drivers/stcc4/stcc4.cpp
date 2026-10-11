@@ -184,6 +184,45 @@ bool STCC4::supports_temp_hum() const { return true; }
 
 TempHumData STCC4::temp_hum_data() { return _last_temp_hum; }
 
+bool STCC4::stop_measurement() {
+  if (!_measuring) {
+    return true;
+  }
+
+  // _stop_continuous_measurement() waits STOP_DELAY_MS, the stop command's
+  // execution time. A measurement still in flight can finish inside that
+  // window and raise the data-ready flag. init() treats a ready flag as
+  // "still in continuous mode" and skips the start command, so drop any such
+  // sample now while the sensor is idle.
+  if (!_stop_continuous_measurement()) {
+    return false;
+  }
+  if (!_discard_pending_measurement()) {
+    ESP_LOGW(TAG, "Failed to discard pending sample after stop; next init may resume it");
+  }
+
+  ESP_LOGI(TAG, "Continuous measurement stopped for sleep");
+  return true;
+}
+
+bool STCC4::_discard_pending_measurement() {
+  uint16_t data_ready_status = 0;
+  if (!_read_data_ready_status(data_ready_status)) {
+    return false;
+  }
+  if ((data_ready_status & DATA_READY_STATUS_MASK) == 0U) {
+    return true;
+  }
+
+  uint8_t i2c_buf[MEASUREMENT_I2C_SIZE];
+  uint8_t data_buf[MEASUREMENT_DATA_SIZE];
+  if (!_write_command(CMD_READ_MEASUREMENT)) {
+    return false;
+  }
+  RTOS::delay_ms(READ_DELAY_MS);
+  return _read_data(i2c_buf, MEASUREMENT_I2C_SIZE, data_buf, MEASUREMENT_DATA_SIZE);
+}
+
 uint8_t STCC4::_calc_crc8(const uint8_t *data, uint8_t len) {
   uint8_t crc = 0xFF;
   for (uint8_t i = 0; i < len; i++) {

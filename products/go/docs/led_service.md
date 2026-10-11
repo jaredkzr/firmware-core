@@ -2,8 +2,8 @@
 
 Product-specific LED service for AirGradient Go. Drives the LP5036
 36-channel I2C LED controller on the mobile-display sub-PCB through an
-adaptive render loop. The service manages three independent LED groups
-(front indicators, back AQI, touch feedback) and supports time-evolving
+adaptive render loop. The service manages two independent LED groups
+(back AQI and touch feedback) and supports time-evolving
 effects such as blink, breathe, fade, chase, and sequenced animations.
 Active on board variant V1; inert on Prototype.
 
@@ -49,6 +49,7 @@ variant.
 | `queue_depth` | `uint8_t` | 8 | Command queue capacity |
 | `touch_flash_ms` | `uint32_t` | 120 | Touch flash duration |
 | `frame_interval_ms` | `uint32_t` | 30 | Frame tick interval (~33 fps) |
+| `shutdown_timeout_ms` | `uint32_t` | 500 | `shutdown()` wait for the enqueue and again for the worker's confirmation |
 
 ### Lifecycle
 
@@ -56,12 +57,7 @@ variant.
 |---|---|---|
 | `init()` | `bool` | Init driver, create queue. Cached: second call returns first result. |
 | `start()` | `bool` | Spawn worker task. Idempotent. |
-
-### Front (Static)
-
-| Method | Purpose |
-|---|---|
-| `front_set_brightness(b)` | Set front indicator LEDs (OUT30, OUT31) to Off/Dim/Mid/Bright |
+| `shutdown()` | `void` | Synchronous: all LEDs off, effects cancelled, driver in standby. Later commands are dropped. Idempotent. |
 
 ### Back (Animated)
 
@@ -99,21 +95,10 @@ variant.
 | LED7 | OUT18/19/20 | Back (index 3) |
 | LED9 | OUT24/25/26 | Back (index 4) |
 | LED10 | OUT27/28/29 | Touch Select |
-| LED25 | OUT30 | Front indicator |
-| LED26 | OUT31 | Front indicator |
 
 LED8 (OUT21/22/23) is reserved for a future follow-up.
 
 ## Brightness and PWM Tables
-
-### Front PWM
-
-| `LedBrightness` | PWM |
-|---|---:|
-| Off | 0 |
-| Dim | 5 |
-| Mid | 13 |
-| Bright | 26 |
 
 ### Back Scale
 
@@ -139,7 +124,7 @@ Output per channel: `(effect_value * scale) / 255`.
 ### Composite LED Test
 
 The orchestrator provides a blocking diagnostic that exercises every mapped
-LED group. Both front indicators and all three touch LEDs remain bright while
+LED group. All three touch LEDs remain bright while
 the five back LEDs show red, green, and blue for one second each. After three
 seconds, the orchestrator restores the configured group levels and the latest
 valid AQI color, or clears the back LEDs when PM2.5 is invalid.
@@ -287,7 +272,6 @@ the orchestrator sets the AQI color when the first measurement arrives.
 
 | Setting | NVS Key | BLE Key | Enum | Valid Range | Default |
 |---|---|---|---|---:|---|
-| Front brightness | `lb` | `fled` | `LedBrightness` | 0..3 | Off |
 | Back brightness | `blb` | `bled` | `LedBrightness` | 0..3 | Off |
 | Touch intensity | `tlb` | `tled` | `TouchLedIntensity` | 0..2 | Off |
 
@@ -295,6 +279,26 @@ Missing NVS key or invalid value loads as Off. BLE writes with
 out-of-range values are silently rejected. Settings are applied
 at boot in `Orchestrator::init()` and immediately on UI change in
 `apply_settings_change()`.
+
+### Shutdown
+
+`shutdown()` runs before deep sleep or power-off. It sets a flag that makes
+every later public call a no-op, then:
+
+- **Worker running:** enqueues a `Shutdown` command (commands already queued
+  run first) and waits up to `shutdown_timeout_ms` for the worker to confirm
+  through a one-slot ack queue. The worker writes all five back and three
+  touch RGB groups to zero, calls `LedDriver::standby()`, acks, and parks on
+  its command queue, never touching the driver again. Driver access stays on
+  the worker task, so there is no lock and no deadlock. A timeout only logs
+  a warning.
+- **No worker** (`start()` not called or task creation failed): the same
+  steps run inline on the caller's task.
+
+`LP5036::standby()` writes `DEVICE_CONFIG0 = 0x00`, clearing Chip_EN
+(bit 6). `LP5036::init()` writes Chip_EN again and zeroes all 36 outputs on
+the next boot. Boot paths that never create the LED service leave the chip
+in standby.
 
 ## Inert Mode
 
@@ -317,6 +321,8 @@ The LP5036 `.cpp` is not linked into host tests.
   first failure WARN, first recovery INFO) and not retried. The dirty
   flag is cleared unconditionally to avoid busy-looping on a faulty bus.
 - **Queue full**: Enqueue is dropped silently. The next call re-syncs.
+- **Shutdown queue full or no ack**: `shutdown()` logs a warning after
+  `shutdown_timeout_ms` and returns; it never blocks sleep entry.
 - **Mutators before init/start**: All are no-ops. No crash, no queue
   access.
 - **Fade from Chase**: `_last_rendered_back` stores the chase base color
