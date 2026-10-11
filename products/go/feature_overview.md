@@ -60,9 +60,10 @@ The default mode on a fresh device is Portable.
 
 Portable mode has an optional **Portable Sleep** setting (off by default). When
 it is on and no phone is connected, the locked device sleeps between
-measurements to save battery. While it sleeps, the phone app cannot see it.
-Pressing the power button wakes it, and the paired phone reconnects. When a
-phone is connected, the device stays awake and streams live readings as usual.
+measurements to save battery. It wakes briefly every 10 seconds to advertise
+over BLE, so the paired phone can still connect; a connection keeps it awake
+and streaming live readings as usual. Pressing the power button also wakes and
+unlocks it. TVOC and NOx indexes keep working across sleeps.
 
 ## Tracking And Route Logging
 
@@ -84,8 +85,8 @@ charts, GPS, and existing data export continue; Stationary cloud upload and
 configuration polling also continue. The display replaces the recording dot
 with a pause icon. A paused route must be stopped before it can be deleted.
 
-The device also keeps a short temporary measurement history for on-device charts.
-This chart data is separate from the persistent route log.
+The device also keeps the last four hours of readings, in 2-minute averages,
+for on-device charts. This chart data is separate from the persistent route log.
 
 ## Display And Navigation
 

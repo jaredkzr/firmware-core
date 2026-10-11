@@ -72,6 +72,13 @@ void SensorProducer::idle_sensors_for_sleep() {
   _manager.idle_for_sleep();
 }
 
+bool SensorProducer::tvoc_nox_index_state(TvocNoxIndexState &out) const {
+  if (_task_handle != nullptr) {
+    return false;
+  }
+  return _manager.get_tvoc_nox_index_state(out);
+}
+
 void SensorProducer::request_measurement(uint8_t iterations, SensorGroup groups,
                                          MeasurementOrigin origin) {
   if (_task_handle != nullptr) {
@@ -169,10 +176,18 @@ void SensorProducer::run() {
   // algorithm configuration succeeds. The sampler converts the indefinite
   // task_notify_wait into a timeout-driven loop that feeds the Sensirion
   // algorithm at a fixed cadence independent of the measurement interval.
-  _sampler_enabled =
-      _manager.has_tvoc_nox_sensor() &&
-      _manager.configure_tvoc_nox_index(SAMPLER_TICK_MS, _config.tvoc_learning_offset,
-                                        _config.nox_learning_offset);
+  // An algorithm already resumed by the boot path (deep-sleep state from RTC,
+  // or a fast-path promotion) keeps its learned baseline and is only retimed.
+  if (_manager.is_tvoc_nox_index_configured()) {
+    _sampler_enabled = _manager.set_tvoc_nox_sampling_interval(SAMPLER_TICK_MS);
+    (void)_manager.set_tvoc_nox_learning_offsets(_config.tvoc_learning_offset,
+                                                 _config.nox_learning_offset);
+  } else {
+    _sampler_enabled =
+        _manager.has_tvoc_nox_sensor() &&
+        _manager.configure_tvoc_nox_index(SAMPLER_TICK_MS, _config.tvoc_learning_offset,
+                                          _config.nox_learning_offset);
+  }
 
   if (_sampler_enabled) {
     AG_LOGI(TAG, "gas-index sampler enabled (%lu ms)", static_cast<unsigned long>(SAMPLER_TICK_MS));

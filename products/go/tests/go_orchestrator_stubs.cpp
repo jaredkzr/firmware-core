@@ -14,6 +14,7 @@
 #include "go_ble.h"
 #include "go_cloud.h"
 #include "go_display.h"
+#include "go_gas_index_rtc.h"
 #include "gps/gps_service.h"
 #include "go_input.h"
 #include "led/go_led.h"
@@ -503,6 +504,11 @@ void SensorProducer::stop(bool sleep_pm) {
 
 void SensorProducer::idle_sensors_for_sleep() { ++test_spy::sensor_idle_for_sleep_count; }
 
+bool SensorProducer::tvoc_nox_index_state(TvocNoxIndexState & /*out*/) const { return false; }
+
+// go_gas_index_rtc.cpp is not linked here (it needs the real SensorManager).
+void save_rtc_gas_index(const TvocNoxIndexState & /*state*/, uint32_t /*sample_s*/) {}
+
 void SensorProducer::request_measurement(uint8_t iterations, SensorGroup groups,
                                          MeasurementOrigin origin) {
   test_spy::measurement_requested = true;
@@ -610,10 +616,6 @@ uint16_t StorageService::read_cached_field(CacheField /*field*/, float * /*out*/
 }
 
 uint16_t StorageService::read_cache(MeasuresAGo * /*out*/, uint16_t /*max_count*/) const {
-  return 0;
-}
-
-uint16_t StorageService::read_cache_times(uint32_t * /*out_s*/, uint16_t /*max_count*/) const {
   return 0;
 }
 
@@ -791,7 +793,7 @@ void PowerService::set_pm_power(bool on) {
   ++test_spy::pm_power_set_count;
 }
 
-void PowerService::enter_sleep(uint32_t /*sleep_duration_ms*/) {}
+void PowerService::enter_sleep(uint32_t /*sleep_duration_ms*/, bool /*ble_windows*/) {}
 
 WakeCause PowerService::get_wake_cause() { return WakeCause::PowerOn; }
 
@@ -1279,8 +1281,12 @@ MeasuresAGo CloudService::_snapshot_copy() { return _latest_snapshot; }
 // orchestrator test target) but are never driven here.
 // ============================================================================
 
-OtaService::OtaService(AgBleServer &server, PowerService &power, const Config &cfg)
-    : _server(server), _power(power), _config(cfg), _writer(), _ble_ota(_server, _writer) {}
+OtaService::OtaService(AgBleServer &server, PowerService & /*power*/, const Config &cfg)
+    : _server(server), _feed_watchdog([] {}), _config(cfg), _writer(), _ble_ota(_server, _writer) {}
+
+OtaService::OtaService(AgBleServer &server, std::function<void()> feed_watchdog, const Config &cfg)
+    : _server(server), _feed_watchdog(std::move(feed_watchdog)), _config(cfg), _writer(),
+      _ble_ota(_server, _writer) {}
 
 bool OtaService::setup_ble() {
   test_spy::ota_setup_ble_called = true;

@@ -15,6 +15,8 @@ idf_component_register(
          "go_portable_provisioner.cpp"
          "go_power.cpp"
          "go_sensor_producer.cpp"
+         "go_gas_index_rtc.cpp"
+         "go_chart_history.cpp"
          "serial_command/serial_command.cpp"
          "serial_command/serial_command_usb.cpp"
          "go_storage.cpp"

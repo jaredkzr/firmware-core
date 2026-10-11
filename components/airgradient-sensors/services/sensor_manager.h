@@ -54,6 +54,16 @@ enum class SensorGroup : uint8_t {
   All = 0x07,
 };
 
+/**
+ * @brief Snapshot of the hosted Sensirion VOC and NOx gas-index algorithms.
+ *
+ * Plain data, so it can be copied into RTC memory to survive deep sleep.
+ */
+struct TvocNoxIndexState {
+  GasIndexAlgorithmParams voc;
+  GasIndexAlgorithmParams nox;
+};
+
 inline SensorGroup operator|(SensorGroup a, SensorGroup b) {
   return static_cast<SensorGroup>(static_cast<uint8_t>(a) | static_cast<uint8_t>(b));
 }
@@ -183,6 +193,28 @@ public:
   bool configure_tvoc_nox_index(uint32_t sampling_interval_ms,
                                 int tvoc_learning_offset = GAS_INDEX_LEARNING_OFFSET_HOURS_DEFAULT,
                                 int nox_learning_offset = GAS_INDEX_LEARNING_OFFSET_HOURS_DEFAULT);
+
+  /// True once configure_tvoc_nox_index() or restore_tvoc_nox_index() succeeded.
+  bool is_tvoc_nox_index_configured() const { return _index_configured; }
+
+  /// Copy the running VOC and NOx algorithm state (learned baseline, filters,
+  /// uptime) so it can outlive this object, e.g. in RTC memory across a deep
+  /// sleep. Returns false when the algorithm is not configured.
+  bool get_tvoc_nox_index_state(TvocNoxIndexState &out) const;
+
+  /// Resume the algorithms from a state saved by get_tvoc_nox_index_state(),
+  /// keeping the learned baseline instead of restarting the 45 s blackout and
+  /// initial learning. Retimes to @p sampling_interval_ms (see
+  /// set_tvoc_nox_sampling_interval()). Returns false when no TVOC/NOx sensor
+  /// is wired, the state is not a VOC/NOx pair, or the interval is invalid.
+  bool restore_tvoc_nox_index(const TvocNoxIndexState &state, uint32_t sampling_interval_ms);
+
+  /// Change the cadence the algorithms assume between samples, keeping their
+  /// learned state. Duty-cycled callers (one sample per deep-sleep wake) pass
+  /// the time since the previous sample. Sensirion tests 1 s and 10 s; longer
+  /// intervals scale the same time constants. Returns false when the
+  /// algorithm is not configured or the interval is below 1000 ms.
+  bool set_tvoc_nox_sampling_interval(uint32_t sampling_interval_ms);
 
   /// Update learning offsets for the hosted VOC and NOx gas-index algorithms.
   /// Only algorithms with changed offsets have their tuning updated.

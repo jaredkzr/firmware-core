@@ -44,6 +44,14 @@
 struct GoBoard;
 class GoLocalApiService;
 
+/// Bring up the Portable BLE stack: register the data, provisioning, and OTA
+/// GATT services, then advertise. Shared by the orchestrator and the boot
+/// paths that advertise before it exists (connect windows, the fast path).
+/// Provisioning and OTA failures only drop those services. Returns false,
+/// with the stack released, when the data service cannot advertise.
+bool start_portable_ble_services(BleService &ble, PortableWifiProvisioner &provisioner,
+                                 OtaService &ota, const char *serial);
+
 class Orchestrator {
 public:
   /// References to all product services.  All referenced objects must outlive
@@ -226,8 +234,6 @@ private:
 
   // --- Display buffers (mutable for const build_context) ---
   mutable Measures _display_measures{};
-  mutable MeasuresAGo _cache_buf[UI_CHART_BUF_SIZE]{};
-  mutable uint32_t _cache_time_buf[UI_CHART_BUF_SIZE]{};
 
   // --- Constants ---
   static constexpr uint32_t BMS_POLL_INTERVAL_MS = 30000;

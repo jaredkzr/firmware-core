@@ -24,6 +24,8 @@
 #include "common.h"
 #include "go_ble_protocol.h"
 #include "go_board.h"
+#include "go_chart_history.h"
+#include "go_gas_index_rtc.h"
 #include "go_local_api.h"
 #include "go_melody.h"
 #include "go_melody_sync.h"
@@ -1106,6 +1108,8 @@ void Orchestrator::on_sensor_data(const MeasuresAGo &data, MeasurementOrigin ori
 
   if (origin == MeasurementOrigin::Scheduled) {
     _svc.storage_service.cache_measurement(_raw_measures);
+    rtc_chart_history().record(_corrected_measures,
+                               tracking_seconds_from_ms(RTOS::get_retained_time_ms()));
     // Record
     if (is_recording()) {
       RoutePoint p{};
@@ -2254,6 +2258,7 @@ bool Orchestrator::clear_data() {
   _tracking_timing = TrackingTiming{};
 
   _svc.storage_service.clear_cache();
+  rtc_chart_history().clear();
   const bool routes_cleared = _svc.storage_service.clear_routes();
 
   if (_svc.ble_service.is_connected()) {
@@ -2646,48 +2651,54 @@ void Orchestrator::on_ble_pairing_request(uint32_t passkey) {
   update_display(/*wait=*/true);
 }
 
+bool start_portable_ble_services(BleService &ble, PortableWifiProvisioner &provisioner,
+                                 OtaService &ota, const char *serial) {
+  // Two-phase init so the provisioner can register prov + DIS before
+  // advertising (all GATT services must be registered first).
+  if (!ble.init_stack_and_register(serial)) {
+    AG_LOGE(TAG, "BLE stack init/register failed");
+    return false;
+  }
+  if (!provisioner.attach()) {
+    AG_LOGW(TAG, "portable provisioner attach failed — advertising data service only");
+  }
+
+  // Co-register OTA between the register phase and advertising. Non-fatal on
+  // failure (mirrors attach()): drop any partial registration, advertise without OTA.
+  bool ota_ready = ota.setup_ble();
+  if (!ota_ready) {
+    AG_LOGW(TAG, "OTA setup failed — advertising without OTA");
+    ota.teardown_ble(); // idempotent
+  } else {
+    // Forward central disconnects to OTA synchronously (host task) so an
+    // in-flight transfer aborts before advertising restarts.
+    ble.set_disconnect_observer([&ota](uint16_t, int) { ota.handle_disconnect(); });
+  }
+
+  if (!ble.start_advertising()) {
+    AG_LOGE(TAG, "BLE start_advertising failed");
+    if (ota_ready) {
+      // Roll back so neither the observer nor OTA outlives the released server.
+      ble.set_disconnect_observer(nullptr);
+      ota.teardown_ble();
+    }
+    provisioner.stop(); // release the (now deinit'd) server
+    return false;
+  }
+  return true;
+}
+
 void Orchestrator::init_ble_if_portable() {
   if (_mode != OperatingMode::Portable) {
     return;
   }
 
   if (_svc.ble_service.is_initialized()) {
-    return; // already running
+    return; // already running (a boot path may have started it)
   }
 
   log_heap(TAG, "ble.init:pre");
-  // Two-phase init so the provisioner can register prov + DIS before
-  // advertising (all GATT services must be registered first).
-  if (!_svc.ble_service.init_stack_and_register(_serial)) {
-    AG_LOGE(TAG, "BLE stack init/register failed");
-    return;
-  }
-  if (!_svc.portable_provisioner.attach()) {
-    AG_LOGW(TAG, "portable provisioner attach failed — advertising data service only");
-  }
-
-  // Co-register OTA between the register phase and advertising. Non-fatal on
-  // failure (mirrors attach()): drop any partial registration, advertise without OTA.
-  bool ota_ready = _svc.ota.setup_ble();
-  if (!ota_ready) {
-    AG_LOGW(TAG, "OTA setup failed — advertising without OTA");
-    _svc.ota.teardown_ble(); // idempotent
-  } else {
-    // Forward central disconnects to OTA synchronously (host task) so an
-    // in-flight transfer aborts before advertising restarts.
-    _svc.ble_service.set_disconnect_observer(
-        [this](uint16_t, int) { _svc.ota.handle_disconnect(); });
-  }
-
-  if (!_svc.ble_service.start_advertising()) {
-    AG_LOGE(TAG, "BLE start_advertising failed");
-    if (ota_ready) {
-      // Roll back so neither the observer nor OTA outlives the released server.
-      _svc.ble_service.set_disconnect_observer(nullptr);
-      _svc.ota.teardown_ble();
-    }
-    _svc.portable_provisioner.stop(); // release the (now deinit'd) server
-  }
+  (void)start_portable_ble_services(_svc.ble_service, _svc.portable_provisioner, _svc.ota, _serial);
   log_heap(TAG, "ble.init:post");
 }
 
@@ -3336,23 +3347,13 @@ BuildContext Orchestrator::build_context() const {
   _display_measures.power = _corrected_measures.power;
   _display_measures.pressure = _corrected_measures.pressure;
 
-  // Read chart data cache
-  uint16_t cache_count = _svc.storage_service.read_cache(_cache_buf, UI_CHART_BUF_SIZE);
-  const uint16_t cache_time_count =
-      _svc.storage_service.read_cache_times(_cache_time_buf, UI_CHART_BUF_SIZE);
-  const bool cache_times_known = cache_count > 0 && cache_time_count == cache_count;
-
-  // One retained-clock read serves both the chart time labels and Tracking
+  // One retained-clock read serves both the chart window and Tracking
   // Status, and only when one of them is shown.
-  const bool chart_needs_time =
-      cache_times_known && _svc.ui_manager.active_metric() != Metric::None;
+  const bool chart_needs_time = _svc.ui_manager.active_metric() != Metric::None;
   const bool status_needs_time = tracking_status_refresh_allowed();
   const uint32_t now_retained_s = (chart_needs_time || status_needs_time)
                                       ? tracking_seconds_from_ms(RTOS::get_retained_time_ms())
                                       : TRACKING_TIME_INVALID_S;
-  for (uint16_t i = 0; i < cache_count; ++i) {
-    _cache_buf[i] = apply_measurement_corrections(_cache_buf[i], _settings.corrections);
-  }
 
   // Extract battery data
   uint8_t battery_pct = 0xFF;
@@ -3397,9 +3398,7 @@ BuildContext Orchestrator::build_context() const {
       .use_fahrenheit = _settings.use_fahrenheit,
       .use_feet = _settings.use_feet,
       .pm_use_usaqi = _settings.pm_use_usaqi,
-      .cache = _cache_buf,
-      .cache_count = static_cast<uint8_t>(cache_count),
-      .cache_times_s = cache_times_known ? _cache_time_buf : nullptr,
+      .chart_history = &rtc_chart_history(),
       .now_retained_s = now_retained_s,
       .now_ms = now_ms,
       .gps_data = &_latest_gps,
@@ -3445,7 +3444,7 @@ void Orchestrator::try_enter_sleep() {
   // decision.type == Deep
   prepare_for_sleep(decision.duration_ms);
   AG_LOGI(TAG, "entering deep sleep (%lu ms)", static_cast<unsigned long>(decision.duration_ms));
-  _svc.power_service.enter_sleep(decision.duration_ms);
+  _svc.power_service.enter_sleep(decision.duration_ms, decision.ble_windows);
   // Never returns — CPU reboots on wake.
 }
 
@@ -3478,6 +3477,11 @@ void Orchestrator::prepare_for_sleep(uint32_t sleep_duration_ms) {
   _svc.led_service.shutdown();
   _svc.ble_service.deinit();
   _svc.sensor_producer.stop(/*sleep_pm=*/pm_awake && !hold_pm_sensor);
+  // The next fast-path wake resumes the gas-index baseline from here.
+  TvocNoxIndexState gas_state{};
+  if (_svc.sensor_producer.tvoc_nox_index_state(gas_state)) {
+    save_rtc_gas_index(gas_state, tracking_seconds_from_ms(RTOS::get_retained_time_ms()));
+  }
   if (!hold_pm_sensor) {
     // Cold sleep: the next wake re-initializes every sensor, so idle the
     // always-powered ones instead of letting them measure through the sleep.

@@ -2254,6 +2254,108 @@ TEST_CASE("Gas index algorithm", "[SensorManager]") {
     REQUIRE(result.tvoc_nox.nox_index == MeasuresInvalid::NOX);
   }
 
+  SECTION("restored state skips the blackout and keeps the baseline") {
+    Sensors s{};
+    s.tvoc_nox = &mock_tvoc_nox;
+    SensorManager first(s);
+    REQUIRE(first.configure_tvoc_nox_index(10000));
+    for (int i = 0; i < 6; i++) {
+      EXPECT_READ(mock_tvoc_nox,
+                  (TVOCNOxData{MeasuresInvalid::TVOC, 25000, MeasuresInvalid::NOX, 18000}), true);
+      (void)first.start_measures(1, SensorGroup::TvocNox);
+    }
+    TvocNoxIndexState saved{};
+    REQUIRE(first.get_tvoc_nox_index_state(saved));
+
+    // A new manager (next boot) resumes with a 60 s gap between samples.
+    SensorManager next(s);
+    REQUIRE_FALSE(next.is_tvoc_nox_index_configured());
+    REQUIRE(next.restore_tvoc_nox_index(saved, 60000));
+    REQUIRE(next.is_tvoc_nox_index_configured());
+    EXPECT_READ(mock_tvoc_nox,
+                (TVOCNOxData{MeasuresInvalid::TVOC, 25000, MeasuresInvalid::NOX, 18000}), true);
+    auto result = next.start_measures(1, SensorGroup::TvocNox);
+    CHECK(result.tvoc_nox.tvoc_index >= 1);
+    CHECK(result.tvoc_nox.tvoc_index <= 500);
+    CHECK(result.tvoc_nox.nox_index >= 1);
+    CHECK(result.tvoc_nox.nox_index <= 500);
+
+    TvocNoxIndexState after{};
+    REQUIRE(next.get_tvoc_nox_index_state(after));
+    CHECK(after.voc.mSamplingInterval == 60.0f);
+    // The learning clock advanced by the real 60 s gap, not the 10 s cadence.
+    CHECK(after.voc.m_Mean_Variance_Estimator___Uptime_Gamma ==
+          saved.voc.m_Mean_Variance_Estimator___Uptime_Gamma + 60.0f);
+  }
+
+  SECTION("fresh algorithm at a duty-cycled interval reports after one blackout sample") {
+    Sensors s{};
+    s.tvoc_nox = &mock_tvoc_nox;
+    SensorManager mgr(s);
+    REQUIRE(mgr.configure_tvoc_nox_index(10000));
+    REQUIRE(mgr.set_tvoc_nox_sampling_interval(60000));
+
+    EXPECT_READ(mock_tvoc_nox,
+                (TVOCNOxData{MeasuresInvalid::TVOC, 25000, MeasuresInvalid::NOX, 18000}), true);
+    auto blackout = mgr.start_measures(1, SensorGroup::TvocNox);
+    CHECK(blackout.tvoc_nox.tvoc_index == MeasuresInvalid::TVOC);
+
+    EXPECT_READ(mock_tvoc_nox,
+                (TVOCNOxData{MeasuresInvalid::TVOC, 25000, MeasuresInvalid::NOX, 18000}), true);
+    auto result = mgr.start_measures(1, SensorGroup::TvocNox);
+    CHECK(result.tvoc_nox.tvoc_index >= 1);
+    CHECK(result.tvoc_nox.nox_index >= 1);
+  }
+
+  SECTION("retiming keeps state and matches a fresh algorithm's coefficients") {
+    Sensors s{};
+    s.tvoc_nox = &mock_tvoc_nox;
+    SensorManager mgr(s);
+    REQUIRE(mgr.configure_tvoc_nox_index(1000));
+    for (int i = 0; i < 3; i++) {
+      EXPECT_READ(mock_tvoc_nox,
+                  (TVOCNOxData{MeasuresInvalid::TVOC, 25000, MeasuresInvalid::NOX, 18000}), true);
+      (void)mgr.start_measures(1, SensorGroup::TvocNox);
+    }
+    TvocNoxIndexState before{};
+    REQUIRE(mgr.get_tvoc_nox_index_state(before));
+    REQUIRE(mgr.set_tvoc_nox_sampling_interval(10000));
+    TvocNoxIndexState after{};
+    REQUIRE(mgr.get_tvoc_nox_index_state(after));
+
+    GasIndexAlgorithmParams reference{};
+    GasIndexAlgorithm_init_with_sampling_interval(&reference, GasIndexAlgorithm_ALGORITHM_TYPE_VOC,
+                                                  10.0f);
+    CHECK(after.voc.mSamplingInterval == reference.mSamplingInterval);
+    CHECK(after.voc.m_Mean_Variance_Estimator___Gamma_Initial_Mean ==
+          reference.m_Mean_Variance_Estimator___Gamma_Initial_Mean);
+    CHECK(after.voc.m_Adaptive_Lowpass__A1 == reference.m_Adaptive_Lowpass__A1);
+    CHECK(after.voc.mUptime == before.voc.mUptime);
+    CHECK(after.voc.m_Mean_Variance_Estimator___Mean ==
+          before.voc.m_Mean_Variance_Estimator___Mean);
+    CHECK(after.voc.m_Adaptive_Lowpass___X1 == before.voc.m_Adaptive_Lowpass___X1);
+  }
+
+  SECTION("resume and retime reject invalid input") {
+    Sensors s{};
+    s.tvoc_nox = &mock_tvoc_nox;
+    SensorManager mgr(s);
+    TvocNoxIndexState state{};
+    CHECK_FALSE(mgr.get_tvoc_nox_index_state(state));
+    CHECK_FALSE(mgr.set_tvoc_nox_sampling_interval(60000));
+
+    REQUIRE(mgr.configure_tvoc_nox_index(10000));
+    REQUIRE(mgr.get_tvoc_nox_index_state(state));
+    SensorManager next(s);
+    CHECK_FALSE(next.restore_tvoc_nox_index(state, 500));
+    TvocNoxIndexState swapped{state.nox, state.voc};
+    CHECK_FALSE(next.restore_tvoc_nox_index(swapped, 60000));
+
+    Sensors none{};
+    SensorManager unwired(none);
+    CHECK_FALSE(unwired.restore_tvoc_nox_index(state, 60000));
+  }
+
   SECTION("Invalid raw fields are not passed to algorithm") {
     Sensors s{};
     s.tvoc_nox = &mock_tvoc_nox;

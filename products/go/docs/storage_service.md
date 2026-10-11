@@ -1,7 +1,7 @@
 # Storage Service
 
 Two-tier storage management for AirGradient Go. Maintains a temporary ring
-buffer of sensor measurements for chart rendering (survives deep sleep) and a
+buffer of recent sensor measurements (survives deep sleep) and a
 persistent binary log of GPS + sensor data for route tracking (survives
 power-off). Called synchronously by the orchestrator — no independent task.
 
@@ -16,7 +16,7 @@ power-off). Called synchronously by the orchestrator — no independent task.
 
 | Dependency | Source | Usage |
 |---|---|---|
-| `PayloadCache` | `airgradient-payload-cache` (service) | Temporary chart ring buffer |
+| `PayloadCache` | `airgradient-payload-cache` (service) | Recent-measurement ring buffer |
 | `RtcPayloadCacheStorage` | `airgradient-payload-cache` (backend) | RTC memory backend wired at construction time in `GoHardwareBoard::storage()` |
 | `NandStorage` | `airgradient-nand-storage` (HAL) | NAND flash filesystem mount; provides `mount_path()` for POSIX I/O |
 | `GpsData` | `airgradient-gps` (`types/gps_types.h`) | GPS position and fix included in each `RoutePoint` |
@@ -36,17 +36,10 @@ power-off). Called synchronously by the orchestrator — no independent task.
 | Stored type | `MeasuresAGo` (`CONFIG_PAYLOAD_CACHE_TYPE_AGO`) |
 | Capacity | `PAYLOAD_CACHE_MAX_SIZE` (default 16, configurable via Kconfig) |
 
-The cache delegates storage of the entries to `PayloadCache`:
-`cache_measurement()` calls `push()`, `backup_cache()`/`restore_cache()` call
-`backup()`/`restore()`, and `clear_cache()` calls `clean()`.
-
-`StorageService` also records when each entry was pushed, in retained-clock
-seconds (`RTOS::get_retained_time_ms()`, which keeps counting through deep
-sleep), for the chart time labels. The times are newest-aligned with the
-entries, trimmed to `cached_count()` (the ring holds one fewer entry than its
-slot count), and backed up to RTC memory with the cache. `read_cache_times()`
-returns them only when they cover every cached entry. Otherwise it returns 0
-and the charts omit their time labels until the cache has refilled.
+The cache delegates entirely to `PayloadCache`. `StorageService` adds no
+extra logic — `cache_measurement()` calls `push()`,
+`backup_cache()`/`restore_cache()` call `backup()`/`restore()`, and
+`clear_cache()` calls `clean()`.
 
 ### Persistent (Route Data)
 
@@ -112,9 +105,10 @@ the corresponding `MeasuresInvalid` sentinel so the caller can identify and
 skip them during rendering.
 
 Storage always receives raw `MeasuresAGo` values. Measurement correction is not
-applied by `StorageService`, so RTC chart samples and persistent route points
-retain the original sensor readings. The orchestrator corrects chart scratch
-copies when rendering, while BLE History exports the raw route-point copies and
+applied by `StorageService`, so RTC cache entries and persistent route points
+retain the original sensor readings. The Home charts read the separate
+`ChartHistory` (`go_chart_history.h`), which records corrected values. BLE
+History exports the raw route-point copies and
 leaves correction policy to the client. See the
 [measurement-correction ownership matrix](measurement_corrections.md#consumer-ownership)
 for all raw and corrected consumers.
@@ -136,7 +130,7 @@ wake if the previous chart data should be recovered.
 |---|---|
 | `cache_measurement(m)` | Push `MeasuresAGo` into the ring buffer. Overwrites the oldest entry when full. |
 | `read_cached_field(field, out, max_count)` | Fill `out[]` with the history of one field across all cached entries, oldest-first. Returns the number of values written. |
-| `read_cache_times(out_s, max_count)` | Fill `out_s[]` with each entry's push time (retained-clock seconds), aligned with `read_cache()`. Returns 0 when the times do not cover every entry. |
+| `latest_cached(out)` | Copy the newest cached entry. Returns `false` when the cache is empty. Seeds BLE reads when a connect-window wake promotes to interactive. |
 | `cached_count()` | Number of measurements currently in the buffer. |
 | `backup_cache()` | Persist the ring buffer to RTC memory. Call before deep sleep. |
 | `restore_cache()` | Reload the ring buffer from RTC memory. Call after deep sleep wake. |

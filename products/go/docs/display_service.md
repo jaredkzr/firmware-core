@@ -587,13 +587,13 @@ Screen dispatch:
   grid rows with a chart panel: an inverted title band (y=164..180) with the
   metric name and current value, a Min/Max line (values without units; the
   title carries the unit), a 40 px plot (y=199..238), and a time axis at
-  baseline y=248: the oldest plotted sample's age on the left (`-15m`) and
+  baseline y=248: the oldest plotted sample's age on the left (up to `-4h`) and
   the newest on the right (`now` under one minute, else `-2h`). With no
   plottable samples the panel shows "No history yet". PM2.5/CO2 charts keep
   their 25 px plot and show a clock glyph (Siji `0xE016`) plus the span
   (`15m`) right-aligned on the Max cell's label line. Spans render as `48s`,
-  `15m`, `16h`, or `3d`. Time labels are omitted when the cache times are
-  unknown.
+  `15m`, or `4h`. Time labels are omitted when the clock is unknown. The
+  polyline interpolates between samples and breaks at NaN gaps.
   Logo removed from home page (kept for display-off only).
 - **MainMenu:** Home screen (metric cleared to None) + overlay at y=162.
   The 2 px-thick 1st grid divider is preserved as the menu top border.

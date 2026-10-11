@@ -1,5 +1,7 @@
 #include "go_ui.h"
 
+#include <algorithm>
+#include <cmath>
 #include <cstdio>
 #include <cstring>
 
@@ -10,6 +12,9 @@
 // First-boot setup QR target. Short redirect -> low QR version, scannable
 // on the 128x250 panel.
 static constexpr const char *SETUP_GUIDE_URL = "https://l.airgradient.net/GO";
+
+/// Shortest chart gap left unbridged (see populate_chart()).
+static constexpr uint32_t CHART_BRIDGE_MIN_S = 30 * 60;
 
 // ---------------------------------------------------------------------------
 // Setting option labels
@@ -131,11 +136,6 @@ static constexpr Metric METRIC_CYCLE[] = {
     Metric::Tvoc, Metric::Nox,  Metric::Pressure, Metric::Altitude,
 };
 static constexpr uint8_t METRIC_CYCLE_LEN = sizeof(METRIC_CYCLE) / sizeof(METRIC_CYCLE[0]);
-
-/// Sensirion VOC/NOx gas-index outputs stay within 0..500. Larger values in the
-/// index fields are raw SRAW ticks cached by older firmware, which copied them
-/// there on deep-sleep wakes; the chart skips them rather than mix the scales.
-static constexpr int GAS_INDEX_MAX = 500;
 
 // ---------------------------------------------------------------------------
 // Helpers
@@ -2227,116 +2227,76 @@ void UIManager::populate_accel_test_rows(DisplayValues &v, const BuildContext &c
 // ---------------------------------------------------------------------------
 
 void UIManager::populate_chart(DisplayValues &v, const BuildContext &ctx) const {
-  const MeasuresAGo *cache = ctx.cache;
-  const uint8_t cache_count = ctx.cache_count;
+  v.chart_samples = nullptr;
+  v.chart_count = 0;
+  v.chart_min = 0.0f;
+  v.chart_max = 0.0f;
   v.chart_oldest_age_s = TRACKING_TIME_INVALID_S;
   v.chart_newest_age_s = TRACKING_TIME_INVALID_S;
-  if (_active_metric == Metric::None || cache == nullptr || cache_count == 0) {
-    v.chart_samples = nullptr;
-    v.chart_count = 0;
+
+  ChartSeries series = ChartSeries::Count;
+  switch (_active_metric) {
+  case Metric::Pm25:
+    series = ChartSeries::Pm25;
+    break;
+  case Metric::Co2:
+    series = ChartSeries::Co2;
+    break;
+  case Metric::Temp:
+    series = ChartSeries::Temp;
+    break;
+  case Metric::Humidity:
+    series = ChartSeries::Humidity;
+    break;
+  case Metric::Tvoc:
+    series = ChartSeries::Tvoc;
+    break;
+  case Metric::Nox:
+    series = ChartSeries::Nox;
+    break;
+  case Metric::Pressure:
+    series = ChartSeries::Pressure;
+    break;
+  case Metric::Altitude:
+    series = ChartSeries::Altitude;
+    break;
+  case Metric::None:
+  default:
+    return;
+  }
+  if (ctx.chart_history == nullptr) {
     return;
   }
 
-  uint8_t valid_count = 0;
-  uint8_t first_index = 0;
-  uint8_t last_index = 0;
-  float min_val = 0.0f;
-  float max_val = 0.0f;
+  // Join samples across the gaps a slow measurement interval leaves between
+  // buckets; break the line only for longer outages (device off, paused).
+  const uint32_t interval_s = _setting_measure_interval_seconds > 0
+                                  ? static_cast<uint32_t>(_setting_measure_interval_seconds)
+                                  : 0;
+  const uint32_t bridge_s = std::max(CHART_BRIDGE_MIN_S, 2 * interval_s);
+  const ChartSeriesView view =
+      ctx.chart_history->read(series, ctx.now_retained_s, bridge_s, _chart_buf, UI_CHART_BUF_SIZE);
+  if (view.count == 0) {
+    return;
+  }
+
   bool first = true;
-
-  for (uint8_t i = 0; i < cache_count && i < UI_CHART_BUF_SIZE; ++i) {
-    float sample = 0.0f;
-    bool valid = false;
-
-    switch (_active_metric) {
-    case Metric::Pm25:
-      if (cache[i].pm_a.pm_25 != MeasuresInvalid::PM) {
-        sample = cache[i].pm_a.pm_25;
-        valid = true;
-      }
-      break;
-    case Metric::Co2:
-      if (cache[i].co2.co2 != MeasuresInvalid::CO2) {
-        sample = static_cast<float>(cache[i].co2.co2);
-        valid = true;
-      }
-      break;
-    case Metric::Temp:
-      if (cache[i].temp_hum_a.temperature != MeasuresInvalid::TEMPERATURE) {
-        sample = cache[i].temp_hum_a.temperature;
-        valid = true;
-      }
-      break;
-    case Metric::Humidity:
-      if (cache[i].temp_hum_a.humidity != MeasuresInvalid::HUMIDITY) {
-        sample = cache[i].temp_hum_a.humidity;
-        valid = true;
-      }
-      break;
-    case Metric::Tvoc:
-      if (cache[i].tvoc_nox.is_tvoc_index_valid() &&
-          cache[i].tvoc_nox.tvoc_index <= GAS_INDEX_MAX) {
-        sample = static_cast<float>(cache[i].tvoc_nox.tvoc_index);
-        valid = true;
-      }
-      break;
-    case Metric::Nox:
-      if (cache[i].tvoc_nox.is_nox_index_valid() && cache[i].tvoc_nox.nox_index <= GAS_INDEX_MAX) {
-        sample = static_cast<float>(cache[i].tvoc_nox.nox_index);
-        valid = true;
-      }
-      break;
-    case Metric::Pressure:
-      if (cache[i].pressure.is_pressure_valid()) {
-        sample = cache[i].pressure.pressure;
-        valid = true;
-      }
-      break;
-    case Metric::Altitude:
-      if (cache[i].pressure.is_altitude_valid()) {
-        sample = cache[i].pressure.altitude;
-        valid = true;
-      }
-      break;
-    case Metric::None:
-    default:
-      break;
+  for (uint16_t i = 0; i < view.count; ++i) {
+    const float sample = _chart_buf[i];
+    if (std::isnan(sample)) {
+      continue;
     }
-
-    if (valid) {
-      if (valid_count == 0) {
-        first_index = i;
-      }
-      last_index = i;
-      _chart_buf[valid_count] = sample;
-      if (first) {
-        min_val = sample;
-        max_val = sample;
-        first = false;
-      } else {
-        if (sample < min_val)
-          min_val = sample;
-        if (sample > max_val)
-          max_val = sample;
-      }
-      ++valid_count;
+    if (first || sample < v.chart_min) {
+      v.chart_min = sample;
     }
+    if (first || sample > v.chart_max) {
+      v.chart_max = sample;
+    }
+    first = false;
   }
 
-  v.chart_samples = (valid_count > 0) ? _chart_buf : nullptr;
-  v.chart_count = valid_count;
-  v.chart_min = (valid_count > 0) ? min_val : 0.0f;
-  v.chart_max = (valid_count > 0) ? max_val : 0.0f;
-
-  // Ages of the plotted endpoints, so the labels describe the span actually
-  // drawn (e.g. a TVOC chart that skipped deep-sleep samples).
-  if (valid_count > 0 && ctx.cache_times_s != nullptr &&
-      ctx.now_retained_s != TRACKING_TIME_INVALID_S) {
-    const uint32_t oldest_s = ctx.cache_times_s[first_index];
-    const uint32_t newest_s = ctx.cache_times_s[last_index];
-    if (oldest_s <= newest_s && newest_s <= ctx.now_retained_s) {
-      v.chart_oldest_age_s = ctx.now_retained_s - oldest_s;
-      v.chart_newest_age_s = ctx.now_retained_s - newest_s;
-    }
-  }
+  v.chart_samples = _chart_buf;
+  v.chart_count = static_cast<uint8_t>(view.count);
+  v.chart_oldest_age_s = view.oldest_age_s;
+  v.chart_newest_age_s = view.newest_age_s;
 }

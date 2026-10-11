@@ -227,6 +227,7 @@ catch_discover_tests(go_power_tests)
 
 add_library(go_ui_test_support
     "${AIRGRADIENT_REPO_ROOT}/products/go/main/go_ui.cpp"
+    "${AIRGRADIENT_REPO_ROOT}/products/go/main/go_chart_history.cpp"
     "${AIRGRADIENT_REPO_ROOT}/components/airgradient-common/common.cpp"
     "${AIRGRADIENT_REPO_ROOT}/components/airgradient-common/rtos.cpp"
     "${AIRGRADIENT_REPO_ROOT}/components/airgradient-provisioning/internal/provisioning_qr.cpp"
@@ -255,6 +256,7 @@ target_compile_definitions(go_ui_test_support PUBLIC
 
 add_executable(go_ui_tests
     go_ui.tests.cpp
+    go_chart_history.tests.cpp
 )
 
 target_link_libraries(go_ui_tests PRIVATE
@@ -272,6 +274,7 @@ add_library(go_orchestrator_test_support
     "${AIRGRADIENT_REPO_ROOT}/products/go/main/accel/accel_service.cpp"
     "${AIRGRADIENT_REPO_ROOT}/products/go/main/accel/shake_detector.cpp"
     "${AIRGRADIENT_REPO_ROOT}/products/go/main/go_orchestrator.cpp"
+    "${AIRGRADIENT_REPO_ROOT}/products/go/main/go_chart_history.cpp"
     "${AIRGRADIENT_REPO_ROOT}/products/go/main/serial_command/serial_command.cpp"
     "${AIRGRADIENT_REPO_ROOT}/products/go/main/go_local_api.cpp"
     "${AIRGRADIENT_REPO_ROOT}/components/airgradient-common/retained_uptime.cpp"
@@ -574,6 +577,8 @@ add_library(go_app_test_support
     "${AIRGRADIENT_REPO_ROOT}/products/go/main/accel/accel_service.cpp"
     "${AIRGRADIENT_REPO_ROOT}/products/go/main/accel/shake_detector.cpp"
     "${AIRGRADIENT_REPO_ROOT}/products/go/main/go_app.cpp"
+    "${AIRGRADIENT_REPO_ROOT}/products/go/main/go_gas_index_rtc.cpp"
+    "${AIRGRADIENT_REPO_ROOT}/products/go/main/go_chart_history.cpp"
     "${AIRGRADIENT_REPO_ROOT}/products/go/main/go_local_api.cpp"
     "${AIRGRADIENT_REPO_ROOT}/components/airgradient-common/retained_uptime.cpp"
     "${AIRGRADIENT_REPO_ROOT}/products/go/main/go_settings.cpp"
@@ -646,6 +651,7 @@ catch_discover_tests(go_app_tests)
 
 add_library(go_sensor_producer_test_support
     "${AIRGRADIENT_REPO_ROOT}/products/go/main/go_sensor_producer.cpp"
+    "${AIRGRADIENT_REPO_ROOT}/products/go/main/go_gas_index_rtc.cpp"
     "${AIRGRADIENT_REPO_ROOT}/components/airgradient-sensors/services/sensor_manager.cpp"
     "${AIRGRADIENT_REPO_ROOT}/components/airgradient-common/rtos.cpp"
     "${AIRGRADIENT_REPO_ROOT}/components/sensirion-gas-index-algorithm/sensirion_gas_index_algorithm.c"
@@ -663,6 +669,7 @@ target_compile_definitions(go_sensor_producer_test_support PUBLIC TEST_HOST)
 
 add_executable(go_sensor_producer_tests
     go_sensor_producer.tests.cpp
+    go_gas_index_rtc.tests.cpp
 )
 
 target_link_libraries(go_sensor_producer_tests PRIVATE

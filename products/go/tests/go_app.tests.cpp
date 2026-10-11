@@ -8,6 +8,8 @@
 
 #include <catch2/catch_test_macros.hpp>
 
+#include <algorithm>
+
 #include <functional>
 #include <string>
 #include <vector>
@@ -96,6 +98,11 @@ extern PowerSnapshot snapshot_to_return;
 extern PowerService::SleepDecision sleep_decision_to_return;
 extern bool enter_sleep_called;
 extern uint32_t enter_sleep_duration_ms;
+extern bool enter_sleep_ble_windows;
+extern bool portable_ble_start_result;
+extern int portable_ble_start_count;
+extern bool ble_connected;
+extern int ble_deinit_count;
 extern bool should_hold_pm_result;
 extern bool shutdown_called;
 extern bool power_on_reset;
@@ -113,6 +120,7 @@ extern bool orchestrator_init_called;
 extern bool orchestrator_run_called;
 extern WakeCause orchestrator_wake_cause;
 extern BootHandoff orchestrator_handoff;
+extern const BleService *orchestrator_ble_service;
 extern RtcAppState orchestrator_rtc_state;
 extern RtosQueueHandle orchestrator_event_queue;
 extern GoLocalApiService *orchestrator_local_api;
@@ -514,6 +522,8 @@ public:
 
   void run_fast_path(const RtcAppState &state) { _app.run_fast_path(state); }
 
+  void run_ble_window_path(const RtcAppState &state) { _app.run_ble_window_path(state); }
+
   void run_interactive(WakeCause cause, BootHandoff handoff = {}) {
     _app.run_interactive(cause, handoff);
   }
@@ -530,6 +540,18 @@ TEST_CASE("select_boot_path: Timer + Locked -> FastPath") {
   RtcAppState state{};
   state.lock_state = LockState::Locked;
   CHECK(select_boot_path(WakeCause::Timer, state, false) == BootPath::FastPath);
+}
+
+TEST_CASE("select_boot_path: connect window due -> BleWindow, only for a locked timer wake") {
+  RtcAppState state{};
+  state.mode = OperatingMode::Portable;
+  state.lock_state = LockState::Locked;
+  CHECK(select_boot_path(WakeCause::Timer, state, false, true) == BootPath::BleWindow);
+  CHECK(select_boot_path(WakeCause::Timer, state, false, false) == BootPath::FastPath);
+  CHECK(select_boot_path(WakeCause::Button, state, false, true) == BootPath::ButtonWake);
+  CHECK(select_boot_path(WakeCause::Timer, state, true, true) == BootPath::ChargingOnly);
+  state.lock_state = LockState::Unlocked;
+  CHECK(select_boot_path(WakeCause::Timer, state, false, true) == BootPath::Interactive);
 }
 
 TEST_CASE("select_boot_path: Timer + Unlocked -> Interactive") {
@@ -1249,11 +1271,11 @@ TEST_CASE("execute_fast_path: cold sensors full warmup, measure, sleep") {
   CHECK(test_spy::warmup_step_count > 0);
 }
 
-TEST_CASE("execute_fast_path: TVOC/NOx index stays invalid; raw ticks are kept") {
+TEST_CASE("execute_fast_path: raw TVOC/NOx ticks never become the index") {
   test_spy::reset();
   test_spy::sleep_decision_to_return = {PowerService::SleepType::Deep, 60000};
-  // The fast path never runs the gas-index algorithm, so the driver reports
-  // raw ticks with invalid index sentinels.
+  // The index comes only from the gas-index algorithm (resumed from RTC; see
+  // go_gas_index_rtc tests). Raw ticks stay in the raw fields.
   test_spy::measures_to_return.tvoc_nox.tvoc_raw = 29806;
   test_spy::measures_to_return.tvoc_nox.nox_raw = 16519;
 
@@ -1290,6 +1312,157 @@ TEST_CASE("execute_fast_path: decides sleep for the persisted mode with no BLE l
   CHECK(result.outcome == GoAppTestAccess::Outcome::Sleep);
   CHECK(test_spy::last_decide_sleep_mode == OperatingMode::Portable);
   CHECK_FALSE(test_spy::last_decide_sleep_ble_link);
+}
+
+TEST_CASE("execute_fast_path: Portable Sleep advertises and sleeps in connect windows") {
+  test_spy::reset();
+  test_spy::sleep_decision_to_return = {PowerService::SleepType::Deep, 47000, true};
+  test_spy::portable_ble_start_result = true;
+
+  MockBoard board;
+  board.settings.portable_sleep_enabled = true;
+  GoApp app(board);
+  GoAppTestAccess access(app);
+
+  RtcAppState state{};
+  state.mode = OperatingMode::Portable;
+  volatile bool button = false;
+
+  auto result = access.execute_fast_path(state, button);
+
+  CHECK(test_spy::portable_ble_start_count == 1);
+  CHECK(result.outcome == GoAppTestAccess::Outcome::Sleep);
+  CHECK(result.ble_windows);
+  CHECK(test_spy::ble_deinit_count == 1); // released before deep sleep
+  CHECK_FALSE(test_spy::last_decide_sleep_ble_link);
+}
+
+TEST_CASE("execute_fast_path: BLE stays off outside Portable Sleep") {
+  test_spy::reset();
+  test_spy::portable_ble_start_result = true;
+
+  MockBoard board;
+  GoApp app(board);
+  GoAppTestAccess access(app);
+  volatile bool button = false;
+
+  SECTION("Portable without Portable Sleep") {
+    RtcAppState state{};
+    state.mode = OperatingMode::Portable;
+    (void)access.execute_fast_path(state, button);
+  }
+  SECTION("Offline") {
+    board.settings.portable_sleep_enabled = true;
+    RtcAppState state{};
+    state.mode = OperatingMode::Offline;
+    (void)access.execute_fast_path(state, button);
+  }
+  CHECK(test_spy::portable_ble_start_count == 0);
+}
+
+TEST_CASE("execute_fast_path: a phone connecting during warmup promotes, still locked") {
+  test_spy::reset();
+  test_spy::portable_ble_start_result = true;
+  test_spy::ble_connected = true;
+
+  MockBoard board;
+  board.settings.portable_sleep_enabled = true;
+  GoApp app(board);
+  GoAppTestAccess access(app);
+
+  RtcAppState state{};
+  state.mode = OperatingMode::Portable;
+  state.set_flag(RtcAppFlag::SensorsWarm, false);
+  RtcDisplaySnapshot snapshot{};
+  volatile bool button = false;
+
+  auto result = access.execute_fast_path(state, button, &snapshot, true);
+
+  CHECK(result.outcome == GoAppTestAccess::Outcome::Promote);
+  CHECK(result.handoff.initial_lock_state == LockState::Locked);
+  CHECK(result.handoff.portable_ble != nullptr);
+  CHECK_FALSE(result.handoff.display_painted);
+  CHECK(result.handoff.display_snapshot == &snapshot);
+  CHECK_FALSE(result.handoff.suppress_wake_press);
+  CHECK_FALSE(result.has_measures);
+  CHECK(test_spy::ble_deinit_count == 0); // the link is handed over
+}
+
+TEST_CASE("run_fast_path: Portable Sleep enters deep sleep in connect windows") {
+  test_spy::reset();
+  test_spy::sleep_decision_to_return = {PowerService::SleepType::Deep, 47000, true};
+  MockBoard board;
+  GoApp app(board);
+  GoAppTestAccess access(app);
+  RtcAppState state{};
+  state.mode = OperatingMode::Portable;
+  test_spy::rtc_state = state;
+
+  access.run_fast_path(state);
+
+  CHECK(test_spy::enter_sleep_called);
+  CHECK(test_spy::enter_sleep_duration_ms == 47000);
+  CHECK(test_spy::enter_sleep_ble_windows);
+}
+
+TEST_CASE("run_ble_window_path: no phone goes back to sleep without touching the rest") {
+  test_spy::reset();
+  test_spy::portable_ble_start_result = true;
+  MockBoard board;
+  GoApp app(board);
+  GoAppTestAccess access(app);
+  RtcAppState state{};
+  state.mode = OperatingMode::Portable;
+
+  access.run_ble_window_path(state);
+
+  CHECK(test_spy::portable_ble_start_count == 1);
+  CHECK(test_spy::ble_deinit_count == 1);
+  CHECK_FALSE(test_spy::orchestrator_init_called);
+  CHECK(board.isr_removed);
+  const auto &log = board.call_log;
+  // The LP core keeps feeding the watchdog; sensors, BMS, and holds are untouched.
+  CHECK(std::find(log.begin(), log.end(), "ulp_stop") == log.end());
+  CHECK(std::find(log.begin(), log.end(), "init_buses") == log.end());
+  CHECK(std::find(log.begin(), log.end(), "release_gpio_holds") == log.end());
+}
+
+TEST_CASE("run_ble_window_path: a connected phone hands its BLE link to interactive") {
+  test_spy::reset();
+  test_spy::portable_ble_start_result = true;
+  test_spy::ble_connected = true;
+  MockBoard board;
+  GoApp app(board);
+  GoAppTestAccess access(app);
+  RtcAppState state{};
+  state.mode = OperatingMode::Portable;
+  test_spy::rtc_state = state;
+
+  access.run_ble_window_path(state);
+
+  REQUIRE(test_spy::orchestrator_init_called);
+  CHECK(test_spy::ble_deinit_count == 0);
+  const BootHandoff &handoff = test_spy::orchestrator_handoff;
+  CHECK(handoff.initial_lock_state == LockState::Locked);
+  REQUIRE(handoff.portable_ble != nullptr);
+  CHECK(test_spy::orchestrator_ble_service == handoff.portable_ble->ble);
+  CHECK(test_spy::orchestrator_event_queue == handoff.portable_ble->event_queue);
+  const auto &log = board.call_log;
+  CHECK(std::find(log.begin(), log.end(), "ulp_stop") != log.end());
+}
+
+TEST_CASE("run_ble_window_path: BLE failure still sleeps") {
+  test_spy::reset();
+  test_spy::portable_ble_start_result = false;
+  MockBoard board;
+  GoApp app(board);
+  GoAppTestAccess access(app);
+  RtcAppState state{};
+  state.mode = OperatingMode::Portable;
+
+  access.run_ble_window_path(state);
+
+  CHECK_FALSE(test_spy::orchestrator_init_called);
 }
 
 TEST_CASE("Offline fast path: temperature trip paints shutdown screen and shuts down") {

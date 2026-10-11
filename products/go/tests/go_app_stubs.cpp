@@ -93,6 +93,11 @@ OperatingMode last_decide_sleep_mode = OperatingMode::Stationary;
 bool last_decide_sleep_ble_link = true;
 bool enter_sleep_called = false;
 uint32_t enter_sleep_duration_ms = 0;
+bool enter_sleep_ble_windows = false;
+bool portable_ble_start_result = false;
+int portable_ble_start_count = 0;
+bool ble_connected = false;
+int ble_deinit_count = 0;
 bool should_hold_pm_result = false;
 bool shutdown_called = false;
 bool power_on_reset = false;
@@ -119,6 +124,7 @@ bool wifi_try_fallback_called = false;
 
 // --- Orchestrator ---
 bool orchestrator_init_called = false;
+const BleService *orchestrator_ble_service = nullptr;
 bool orchestrator_run_called = false;
 WakeCause orchestrator_wake_cause = WakeCause::PowerOn;
 BootHandoff orchestrator_handoff{};
@@ -197,6 +203,11 @@ void reset() {
   last_decide_sleep_ble_link = true;
   enter_sleep_called = false;
   enter_sleep_duration_ms = 0;
+  enter_sleep_ble_windows = false;
+  portable_ble_start_result = false;
+  portable_ble_start_count = 0;
+  ble_connected = false;
+  ble_deinit_count = 0;
   should_hold_pm_result = false;
   shutdown_called = false;
   power_on_reset = false;
@@ -220,6 +231,7 @@ void reset() {
   wifi_try_fallback_called = false;
 
   orchestrator_init_called = false;
+  orchestrator_ble_service = nullptr;
   orchestrator_run_called = false;
   orchestrator_wake_cause = WakeCause::PowerOn;
   orchestrator_handoff = BootHandoff{};
@@ -331,6 +343,23 @@ SensorManager::set_tvoc_nox_learning_offsets(int /*tvoc_learning_offset*/,
   return TvocNoxLearningOffsetResult::Unsupported;
 }
 void SensorManager::set_tvoc_nox_compensation(float /*temperature_c*/, float /*humidity_pct*/) {}
+bool StorageService::latest_cached(MeasuresAGo & /*out*/) const { return false; }
+
+// go_orchestrator.cpp is not linked here.
+bool start_portable_ble_services(BleService & /*ble*/, PortableWifiProvisioner & /*provisioner*/,
+                                 OtaService & /*ota*/, const char * /*serial*/) {
+  ++test_spy::portable_ble_start_count;
+  return test_spy::portable_ble_start_result;
+}
+
+bool SensorManager::get_tvoc_nox_index_state(TvocNoxIndexState & /*out*/) const { return false; }
+bool SensorManager::restore_tvoc_nox_index(const TvocNoxIndexState & /*state*/,
+                                           uint32_t /*sampling_interval_ms*/) {
+  return false;
+}
+bool SensorManager::set_tvoc_nox_sampling_interval(uint32_t /*sampling_interval_ms*/) {
+  return false;
+}
 
 Measures SensorManager::start_measures(int /*iterations*/, SensorGroup /*groups*/) {
   return test_spy::measures_to_return;
@@ -578,9 +607,17 @@ bool PowerService::should_sleep_pm_sensor(uint32_t /*measure_interval_ms*/) cons
 
 void PowerService::set_pm_power(bool on) { test_spy::pm_power_enabled = on; }
 
-void PowerService::enter_sleep(uint32_t sleep_duration_ms) {
+void PowerService::enter_sleep(uint32_t sleep_duration_ms, bool ble_windows) {
   test_spy::enter_sleep_called = true;
   test_spy::enter_sleep_duration_ms = sleep_duration_ms;
+  test_spy::enter_sleep_ble_windows = ble_windows;
+}
+
+void PowerService::resume_ble_window_sleep(int /*pin_wake_button*/) {}
+
+bool PowerService::is_ble_window_wake(WakeCause /*cause*/, const RtcAppState & /*state*/,
+                                      uint64_t /*now_retained_ms*/) {
+  return false;
 }
 
 bool PowerService::enter_light_sleep(uint32_t sleep_duration_ms) {
@@ -631,9 +668,9 @@ bool BleService::init(const char * /*serial*/) {
   return true;
 }
 
-void BleService::deinit() {}
+void BleService::deinit() { ++test_spy::ble_deinit_count; }
 bool BleService::is_initialized() const { return false; }
-bool BleService::is_connected() const { return false; }
+bool BleService::is_connected() const { return test_spy::ble_connected; }
 bool BleService::is_authenticated() const { return false; }
 void BleService::notify_measures(const MeasuresAGo & /*m*/, const GpsData & /*gps*/,
                                  time_t /*ts*/) {}
@@ -827,8 +864,12 @@ MeasuresAGo CloudService::_snapshot_copy() { return _latest_snapshot; }
 // go_app test target).
 // ============================================================================
 
-OtaService::OtaService(AgBleServer &server, PowerService &power, const Config &cfg)
-    : _server(server), _power(power), _config(cfg), _writer(), _ble_ota(_server, _writer) {}
+OtaService::OtaService(AgBleServer &server, PowerService & /*power*/, const Config &cfg)
+    : _server(server), _feed_watchdog([] {}), _config(cfg), _writer(), _ble_ota(_server, _writer) {}
+
+OtaService::OtaService(AgBleServer &server, std::function<void()> feed_watchdog, const Config &cfg)
+    : _server(server), _feed_watchdog(std::move(feed_watchdog)), _config(cfg), _writer(),
+      _ble_ota(_server, _writer) {}
 
 bool OtaService::setup_ble() { return true; }
 void OtaService::handle_disconnect() {}
@@ -877,6 +918,7 @@ Orchestrator::Orchestrator(RtosQueueHandle event_queue, const Services &services
     : _event_queue(event_queue), _svc(services), _settings(settings), _config_store(config_store),
       _serial(serial) {
   test_spy::orchestrator_event_queue = event_queue;
+  test_spy::orchestrator_ble_service = &services.ble_service;
   test_spy::orchestrator_local_api = &services.local_api;
   test_spy::orchestrator_local_api_system_info = services.local_api.get_system_info();
 }

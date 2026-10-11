@@ -108,6 +108,9 @@ static char *fmt_fg_flags(uint16_t flags, char *buf, size_t len) {
 
 RTC_DATA_ATTR static RtcAppState s_rtc_state;
 RTC_DATA_ATTR static bool s_rtc_state_valid = false;
+// Retained-clock time the next measurement is due during a Portable Sleep
+// cycle split into connect windows; 0 when the current sleep is not split.
+RTC_DATA_ATTR static uint64_t s_rtc_measure_due_ms = 0;
 
 // ---------------------------------------------------------------------------
 // Construction
@@ -672,7 +675,7 @@ PowerService::SleepDecision PowerService::decide_sleep(const GoSettings &setting
   uint32_t sleep_ms = (awake_ms < interval_ms) ? (interval_ms - awake_ms) : 0;
 
   if (sleep_ms >= static_cast<uint32_t>(_config.deep_sleep_threshold_ms)) {
-    return {SleepType::Deep, sleep_ms};
+    return {SleepType::Deep, sleep_ms, mode == OperatingMode::Portable};
   }
   // Interval too short: deep sleep overhead (~3–4 s reboot) exceeds the
   // sleep duration.  Stay awake and let the main loop run normally.
@@ -708,7 +711,14 @@ void PowerService::set_pm_power(bool on) {
 // Sleep entry — platform-specific, guarded by #ifndef TEST_HOST
 // ---------------------------------------------------------------------------
 
-void PowerService::enter_sleep(uint32_t sleep_duration_ms) {
+uint32_t ble_window_timer_ms(uint32_t remaining_ms) {
+  if (remaining_ms <= BLE_WINDOW_PERIOD_MS + BLE_WINDOW_MIN_SLEEP_MS) {
+    return remaining_ms;
+  }
+  return BLE_WINDOW_PERIOD_MS;
+}
+
+void PowerService::enter_sleep(uint32_t sleep_duration_ms, bool ble_windows) {
   // Stop the charger's continuous ADC conversion: nothing reads telemetry
   // while the CPU sleeps. BQ25629 init() re-enables it on the next boot.
   // A failure only costs sleep current, so log it and keep going.
@@ -716,19 +726,48 @@ void PowerService::enter_sleep(uint32_t sleep_duration_ms) {
     AG_LOGW(TAG, "enter_sleep: BMS ADC disable failed or unsupported");
   }
 
+  // Connect-window wakes find the measurement due time here.
+  s_rtc_measure_due_ms = ble_windows ? RTOS::get_retained_time_ms() + sleep_duration_ms : 0;
+  const uint32_t timer_ms =
+      ble_windows ? ble_window_timer_ms(sleep_duration_ms) : sleep_duration_ms;
+
 #ifndef TEST_HOST
   // Hold PM sensor power GPIO during short sleeps so the sensor stays warm
-  // and the next fast-path boot can skip the 10 s warmup.
+  // and the next fast-path boot can skip the 10 s warmup. The hold follows
+  // the time to the next measurement, not the first connect-window timer.
   if (should_hold_pm_sensor(sleep_duration_ms)) {
     auto pin = static_cast<gpio_num_t>(_config.pin_pm_power);
     gpio_hold_en(pin);
     AG_LOGI(TAG, "enter_sleep: holding PM power GPIO %d for warm wake", _config.pin_pm_power);
   }
 
-  AG_LOGI(TAG, "enter_sleep: entering deep sleep for %" PRIu32 " ms", sleep_duration_ms);
-  configure_wake_sources(sleep_duration_ms);
+  AG_LOGI(TAG, "enter_sleep: entering deep sleep for %" PRIu32 " ms (timer %" PRIu32 " ms)",
+          sleep_duration_ms, timer_ms);
+  configure_wake_sources(timer_ms);
   esp_deep_sleep_start();
   // Does not return — CPU reboots on wake.
+#else
+  (void)timer_ms;
+#endif
+}
+
+// static
+void PowerService::resume_ble_window_sleep(int pin_wake_button) {
+  const uint64_t now_ms = RTOS::get_retained_time_ms();
+  const uint32_t remaining_ms =
+      s_rtc_measure_due_ms > now_ms ? static_cast<uint32_t>(s_rtc_measure_due_ms - now_ms) : 0;
+  const uint32_t timer_ms = ble_window_timer_ms(remaining_ms);
+#ifndef TEST_HOST
+  AG_LOGI(TAG, "connect window: sleeping %" PRIu32 " ms (measurement in %" PRIu32 " ms)", timer_ms,
+          remaining_ms);
+  esp_sleep_enable_timer_wakeup(static_cast<uint64_t>(timer_ms > 0 ? timer_ms : 1) * 1000ULL);
+  if (pin_wake_button >= 0) {
+    esp_sleep_enable_ext1_wakeup(1ULL << pin_wake_button, ESP_EXT1_WAKEUP_ANY_LOW);
+  }
+  esp_deep_sleep_start();
+#else
+  (void)timer_ms;
+  (void)pin_wake_button;
 #endif
 }
 
@@ -793,6 +832,13 @@ WakeCause PowerService::get_wake_cause() {
 // static
 bool PowerService::is_fast_path_wake(WakeCause cause, const RtcAppState &state) {
   return cause == WakeCause::Timer && state.lock_state == LockState::Locked;
+}
+
+// static
+bool PowerService::is_ble_window_wake(WakeCause cause, const RtcAppState &state,
+                                      uint64_t now_retained_ms) {
+  return is_fast_path_wake(cause, state) && state.mode == OperatingMode::Portable &&
+         s_rtc_measure_due_ms > now_retained_ms + BLE_WINDOW_MIN_SLEEP_MS;
 }
 
 // static

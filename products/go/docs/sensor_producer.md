@@ -206,7 +206,12 @@ introduce a new 45-second blackout.
 ### Task Loop
 
 After warmup, the producer enables a gas-index sampler when an SGP41
-sensor is wired and `configure_tvoc_nox_index()` succeeds. The sampler
+sensor is wired and `configure_tvoc_nox_index()` succeeds. When the boot path
+already resumed the algorithm (`resume_gas_index_for_sampler()` from RTC, or a
+fast-path promotion), the producer only retimes it to the sampler cadence with
+`set_tvoc_nox_sampling_interval()`, keeping the learned baseline. Before deep
+sleep the orchestrator saves the state with `tvoc_nox_index_state()` and
+`save_rtc_gas_index()`. The sampler
 converts the indefinite `task_notify_wait` into a timeout-driven loop so
 the Sensirion algorithm is fed at a fixed cadence (Kconfig-configurable,
 default 10 s) independent of the measurement interval.
@@ -288,11 +293,13 @@ then calls `start_measures(1, TvocNox)` and caches the result in
 
 #### Offline (fast path)
 
-In Offline mode, no `SensorProducer` is created. The fast path calls
-`start_measures(1, All)` directly on `SensorManager`. The algorithm is
-never configured (`_index_configured == false`), so index fields stay at
-invalid sentinels and the display shows "-". Raw ticks are kept in
-`tvoc_raw` / `nox_raw` for routes and diagnostics.
+In Offline mode and Portable Sleep, no `SensorProducer` is created. The fast
+path calls `start_measures(1, All)` directly on `SensorManager`, after
+`resume_gas_index_for_sample()` restores the algorithm state the previous wake
+saved in RTC memory, retimed to the real gap between samples (a fresh
+algorithm when none is saved or it is over 1 h old). The state is saved again
+after the sample, so the index keeps its baseline across sleeps. Raw ticks are
+kept in `tvoc_raw` / `nox_raw` for routes and diagnostics.
 
 ### Orchestrator Signalling
 

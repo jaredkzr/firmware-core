@@ -375,6 +375,61 @@ TEST_CASE("set_bms: attaches charger after degraded construction", "[PowerServic
   CHECK(svc.reset_watchdog());
 }
 
+TEST_CASE("ble_window_timer_ms: wakes every period, folding a short tail",
+          "[PowerService][sleep]") {
+  CHECK(ble_window_timer_ms(57000) == BLE_WINDOW_PERIOD_MS);
+  CHECK(ble_window_timer_ms(BLE_WINDOW_PERIOD_MS + BLE_WINDOW_MIN_SLEEP_MS + 1) ==
+        BLE_WINDOW_PERIOD_MS);
+  // A tail shorter than BLE_WINDOW_MIN_SLEEP_MS joins the last segment.
+  CHECK(ble_window_timer_ms(BLE_WINDOW_PERIOD_MS + BLE_WINDOW_MIN_SLEEP_MS) ==
+        BLE_WINDOW_PERIOD_MS + BLE_WINDOW_MIN_SLEEP_MS);
+  CHECK(ble_window_timer_ms(4000) == 4000);
+  CHECK(ble_window_timer_ms(0) == 0);
+}
+
+namespace {
+/// Host RTOS whose retained clock the test sets.
+class RetainedClockRTOS : public RTOS {
+public:
+  void delay_ms_impl(uint32_t) override {}
+  uint64_t get_time_ms_impl() override { return 0; }
+  uint64_t get_retained_time_ms_impl() override { return retained_ms; }
+  void set_system_time_from_epoch_impl(int64_t) override {}
+  uint64_t retained_ms = 0;
+};
+} // namespace
+
+TEST_CASE("connect windows: a split sleep marks its timer wakes", "[PowerService][sleep]") {
+  RetainedClockRTOS clock;
+  RTOS::set_instance(&clock);
+  PowerService svc(nullptr, test_gpio_hal, DEFAULT_CONFIG);
+  RtcAppState state{};
+  state.mode = OperatingMode::Portable;
+  state.lock_state = LockState::Locked;
+
+  clock.retained_ms = 100000;
+  svc.enter_sleep(47000, /*ble_windows=*/true); // measurement due at 147000
+
+  CHECK(PowerService::is_ble_window_wake(WakeCause::Timer, state, 110000));
+  CHECK(PowerService::is_ble_window_wake(WakeCause::Timer, state, 144999));
+  // Within BLE_WINDOW_MIN_SLEEP_MS of the measurement: measure now.
+  CHECK_FALSE(PowerService::is_ble_window_wake(WakeCause::Timer, state, 145000));
+  CHECK_FALSE(PowerService::is_ble_window_wake(WakeCause::Timer, state, 150000));
+  CHECK_FALSE(PowerService::is_ble_window_wake(WakeCause::Button, state, 110000));
+  RtcAppState unlocked = state;
+  unlocked.lock_state = LockState::Unlocked;
+  CHECK_FALSE(PowerService::is_ble_window_wake(WakeCause::Timer, unlocked, 110000));
+  RtcAppState offline = state;
+  offline.mode = OperatingMode::Offline;
+  CHECK_FALSE(PowerService::is_ble_window_wake(WakeCause::Timer, offline, 110000));
+
+  // A sleep that is not split clears the due time.
+  svc.enter_sleep(47000);
+  CHECK_FALSE(PowerService::is_ble_window_wake(WakeCause::Timer, state, 110000));
+
+  RTOS::set_instance(nullptr);
+}
+
 TEST_CASE("enter_sleep: disables the BMS ADC before deep sleep", "[PowerService][sleep]") {
   SECTION("ADC disabled on the attached BMS") {
     MockBmsDevice mock_bms;
@@ -443,6 +498,7 @@ TEST_CASE("decide_sleep: sleep type and duration", "[PowerService][sleep]") {
     auto d = svc.decide_sleep(settings, LockState::Locked, OperatingMode::Portable, 3000, false);
     CHECK(d.type == PowerService::SleepType::Deep);
     CHECK(d.duration_ms == 57000);
+    CHECK(d.ble_windows); // stays connectable between measurements
   }
 
   SECTION("Portable sleep enabled but BLE link active — None") {
@@ -487,6 +543,7 @@ TEST_CASE("decide_sleep: sleep type and duration", "[PowerService][sleep]") {
 
     auto d = svc.decide_sleep(settings, LockState::Locked, OperatingMode::Offline, 0, true);
     CHECK(d.type == PowerService::SleepType::Deep);
+    CHECK_FALSE(d.ble_windows); // Offline has no BLE
   }
 
   SECTION("Non-Offline mode (Portable sleep disabled) — None with zero duration") {

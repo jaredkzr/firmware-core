@@ -65,6 +65,11 @@ public:
   /// re-initialize the sensors, so never use this when the task restarts.
   void idle_sensors_for_sleep();
 
+  /// Copy the gas-index algorithm state for the next boot to resume. Call
+  /// only after stop(), so the sampler cannot advance it mid-copy. Returns
+  /// false while the task runs or when the algorithm is not configured.
+  bool tvoc_nox_index_state(TvocNoxIndexState &out) const;
+
   /// Trigger one measurement cycle with the given iteration count.
   /// Non-blocking: returns immediately after signalling the task via
   /// RTOS::task_notify_send().

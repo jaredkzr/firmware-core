@@ -44,6 +44,11 @@ public:
   /// watchdog); owns the writer.  Both must outlive this service.
   OtaService(AgBleServer &server, PowerService &power, const Config &cfg);
 
+  /// For boot paths that register OTA before the PowerService exists (a
+  /// connect-window wake): @p feed_watchdog runs only during a transfer, which
+  /// cannot start before the orchestrator has taken over.
+  OtaService(AgBleServer &server, std::function<void()> feed_watchdog, const Config &cfg);
+
   OtaService(const OtaService &) = delete;
   OtaService &operator=(const OtaService &) = delete;
 
@@ -88,7 +93,7 @@ private:
   void _on_wifi_progress(const OtaProgress &progress);
 
   AgBleServer &_server;
-  PowerService &_power; ///< external-watchdog feeder; alive before OtaService
+  std::function<void()> _feed_watchdog; ///< external-watchdog feeder
   Config _config;
   EspOtaImageWriter _writer;
   OtaBleService _ble_ota; ///< constructed over (_server, _writer)

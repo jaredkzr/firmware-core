@@ -106,6 +106,7 @@ static_assert(sizeof(RtcAppState) == 28, "RTC app state layout must remain 28 by
 
 struct RtcDisplaySnapshot;
 struct MeasuresAGo;
+struct PortableBle;
 
 // --- Boot-to-runtime handoff ---
 //
@@ -138,6 +139,11 @@ struct BootHandoff {
   /// Optional measurement from fast-path boot (promotion case).
   /// When non-null, the Orchestrator seeds its authoritative raw snapshot.
   const MeasuresAGo *fast_path_measures = nullptr;
+
+  /// Portable BLE services already advertising (connect-window or fast-path
+  /// promotion). run_interactive() adopts them instead of constructing new
+  /// ones, so a phone that connected during boot keeps its link.
+  const PortableBle *portable_ble = nullptr;
 };
 
 #endif // GO_TYPES_H

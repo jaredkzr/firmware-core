@@ -3,6 +3,7 @@
 
 #include <cstdint>
 
+#include "go_chart_history.h"
 #include "go_display.h"
 #include "go_melody.h"
 #include "go_settings.h"
@@ -12,8 +13,8 @@
 #include "types/provisioning_types.h"
 #include "types/wifi_types.h"
 
-/// Chart buffer size — matches the payload cache capacity (Kconfig default 16).
-inline constexpr uint8_t UI_CHART_BUF_SIZE = 16;
+/// Chart buffer size — one value per chart-history bucket (4 h).
+inline constexpr uint8_t UI_CHART_BUF_SIZE = CHART_HISTORY_BUCKETS;
 
 /// Snackbar display duration in milliseconds.
 inline constexpr uint32_t SNACKBAR_DURATION_MS = 3000;
@@ -130,13 +131,10 @@ struct BuildContext {
   bool use_feet;
   bool pm_use_usaqi;
 
-  // Temporary measurement cache (for chart rendering)
-  const MeasuresAGo *cache;
-  uint8_t cache_count;
-  /// Push time of each cache entry in retained-clock seconds, aligned with
-  /// `cache`; null when unknown (chart time labels are then omitted).
-  const uint32_t *cache_times_s = nullptr;
-  /// Retained-clock seconds now, the reference for chart sample ages.
+  /// Home chart history (corrected values); null hides the chart.
+  const ChartHistory *chart_history = nullptr;
+  /// Retained-clock seconds now: the right edge of the chart window and the
+  /// reference for its time labels.
   uint32_t now_retained_s = TRACKING_TIME_INVALID_S;
 
   // Current timestamp for snackbar expiry

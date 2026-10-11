@@ -156,6 +156,22 @@ inline bool is_bms_charging(BmsChargingState state) {
 // PowerService
 // ---------------------------------------------------------------------------
 
+/// Portable Sleep keeps the device connectable: the deep sleep between two
+/// measurements is split into timer wakes at most this far apart, and each
+/// one advertises over BLE for BLE_WINDOW_ADVERTISE_MS.
+inline constexpr uint32_t BLE_WINDOW_PERIOD_MS = 10000;
+/// How long a connect-window wake advertises before going back to sleep.
+inline constexpr uint32_t BLE_WINDOW_ADVERTISE_MS = 1000;
+/// A sleep segment shorter than this is merged into the previous one, so the
+/// final wake before a measurement is the measurement wake itself.
+inline constexpr uint32_t BLE_WINDOW_MIN_SLEEP_MS = 2000;
+
+/// Timer to arm for the next sleep segment when @p remaining_ms are left until
+/// the measurement is due: one window period, or all of it when what would be
+/// left after a period is too short to be worth a separate wake.
+/// Pure logic; testable on host.
+uint32_t ble_window_timer_ms(uint32_t remaining_ms);
+
 class PowerService {
 public:
   // -------------------------------------------------------------------------
@@ -189,6 +205,9 @@ public:
   struct SleepDecision {
     SleepType type;       ///< None or Deep
     uint32_t duration_ms; ///< How long to sleep (0 when type == None)
+    /// Wake every BLE_WINDOW_PERIOD_MS to advertise (Portable Sleep), so a
+    /// phone can connect between measurements.
+    bool ble_windows = false;
   };
 
   // -------------------------------------------------------------------------
@@ -385,8 +404,18 @@ public:
   /// must set `RtcAppFlag::SensorsWarm` in the saved state
   /// accordingly before calling `save_state()`.
   ///
-  /// @param sleep_duration_ms How long to sleep before timer wake.
-  void enter_sleep(uint32_t sleep_duration_ms);
+  /// @param sleep_duration_ms How long to sleep before the next measurement.
+  /// @param ble_windows Split the sleep into connect-window wakes (see
+  ///        BLE_WINDOW_PERIOD_MS). The measurement due time is kept in RTC
+  ///        memory for those wakes; otherwise it is cleared.
+  void enter_sleep(uint32_t sleep_duration_ms, bool ble_windows = false);
+
+  /// Go back to deep sleep after a connect-window wake that saw no phone.
+  /// Arms the next segment toward the saved measurement due time. Needs no
+  /// service instance, I2C, or BMS: the window wake initializes none of them,
+  /// and leaves GPIO holds and the LP-core watchdog feeder untouched.
+  /// Does not return (no-op under TEST_HOST).
+  static void resume_ble_window_sleep(int pin_wake_button);
 
   /// Light sleep using the same timer and EXT1 button mask as deep sleep.
   /// Returns true for a button wake or a held power button. Wake sources are
@@ -410,6 +439,12 @@ public:
   ///
   /// Pure logic — no platform dependencies; testable on host.
   static bool is_fast_path_wake(WakeCause cause, const RtcAppState &state);
+
+  /// True when this timer wake is a connect window rather than a measurement:
+  /// a locked Portable Sleep cycle whose measurement is still more than
+  /// BLE_WINDOW_MIN_SLEEP_MS away at @p now_retained_ms.
+  static bool is_ble_window_wake(WakeCause cause, const RtcAppState &state,
+                                 uint64_t now_retained_ms);
 
   /// Release GPIO holds that were enabled before the previous deep sleep.
   ///

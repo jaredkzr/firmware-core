@@ -183,18 +183,54 @@ central connected follows the same deep-sleep cycle as Offline mode:
 
 - **Phone connected:** the device stays awake and streams as usual. Once the
   central disconnects, the next loop iteration may enter deep sleep
-- **While asleep:** BLE is off, so the device does not advertise and the app
-  cannot connect. Measurements, the chart cache, and route points are still
-  recorded by the fast path
-- **Timer wake:** the fast path runs exactly as for Offline and goes back to
-  sleep without starting BLE
+- **While asleep:** the device stays connectable through connect windows (see
+  below). Measurements, the chart history, and route points are still recorded
+  by the fast path
+- **Measurement wake:** the fast path runs as for Offline, but also brings up
+  the Portable BLE services and advertises for the whole wake. A phone that
+  connects promotes the boot to interactive, still locked, with the live link
+  handed over
 - **Button wake:** `select_boot_path()` routes Portable button wakes through
   the button-wake path, which paints the RTC snapshot unlocked and then brings
   BLE up in `Orchestrator::init()`. A bonded phone reconnects while the device
   is unlocked, which keeps it awake
-- **TVOC/NOx index:** the gas-index algorithm needs continuous sampling, so
-  deep-sleep cycles show "-" for TVOC and NOx, the same as Offline mode.
-  Raw ticks are still recorded in the raw fields
+- **TVOC/NOx index:** the Sensirion algorithm state is kept in RTC memory
+  (`go_gas_index_rtc`), so each fast-path wake feeds it one sample, retimed to
+  the real gap since the previous one. The index keeps its learned baseline
+  across sleeps; only the first sample of a fresh algorithm (power-on, or a gap
+  over `GAS_INDEX_RESUME_MAX_GAP_S`, 1 h) falls in the blackout and shows "-".
+  Offline mode benefits the same way
+
+### Connect windows
+
+`decide_sleep()` sets `SleepDecision::ble_windows` for Portable. `enter_sleep()`
+then stores the measurement due time (retained clock) in RTC memory and arms the
+timer for at most `BLE_WINDOW_PERIOD_MS` (10 s) instead of the whole sleep. A
+tail shorter than `BLE_WINDOW_MIN_SLEEP_MS` (2 s) is merged into the last
+segment, so the final wake is the measurement itself.
+
+On a timer wake, `PowerService::is_ble_window_wake()` checks the due time and
+`select_boot_path()` returns `BleWindow` while the measurement is still more than
+2 s away. `GoApp::run_ble_window_path()`:
+
+1. Initializes only NVS (bonds) and the SPI bus. Sensors, I2C, the BMS, the
+   display, and GPIO holds are not touched, and the LP core keeps feeding the
+   external watchdog.
+2. Builds the Portable BLE services (`start_portable_ble()`: data, provisioning,
+   and OTA GATT services; storage stays unmounted) and advertises for
+   `BLE_WINDOW_ADVERTISE_MS` (1 s).
+3. With no phone or button press, releases BLE and calls
+   `PowerService::resume_ble_window_sleep()`, which arms the next segment toward
+   the saved due time.
+4. When a phone connects (or the button is pressed), stops the LP-core feeder
+   and calls `run_interactive()` with `BootHandoff::portable_ble`. Interactive
+   adopts the running services and their event queue instead of constructing
+   new ones, so the phone keeps its link. A locked promotion repaints nothing;
+   the newest cached measurement seeds BLE reads until a fresh one lands.
+
+The orchestrator then stays awake while the phone is connected
+(`decide_sleep()` sees the link) and returns to the sleep cycle after it
+disconnects.
 
 The Portable PM duty cycle can leave the SPS30 asleep when deep sleep begins.
 `prepare_for_sleep()` never holds an `Asleep` PM sensor warm or sends it a
@@ -209,7 +245,10 @@ above, sleeps are cold and the always-powered sensors are idled (see
 
 ## Sleep Entry
 
-`enter_sleep(sleep_duration_ms)` — only called when `decide_sleep()` returns `Deep`:
+`enter_sleep(sleep_duration_ms, ble_windows)` — only called when `decide_sleep()` returns
+`Deep`. With `ble_windows` the timer is armed for the first connect window (see
+[Connect windows](#connect-windows)); the PM hold below still follows
+`sleep_duration_ms`, the time to the next measurement:
 
 1. If `should_hold_pm_sensor(sleep_duration_ms)` is true (sleep < `sensor_hold_max_sleep_ms`
    and `pin_pm_power >= 0`):

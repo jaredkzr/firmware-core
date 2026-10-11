@@ -2556,19 +2556,38 @@ void DisplayService::_draw_chart_span(const DisplayValues &v) {
 
 void DisplayService::_draw_chart(const DisplayValues &v, int plot_x, int plot_y, int plot_w,
                                  int plot_h_px) {
-  // Polyline only — no axes, no border lines.
+  // Polyline only — no axes, no border lines. Samples are evenly spaced in
+  // time; NaN marks a gap, where the line breaks.
   if (v.chart_samples == nullptr || v.chart_count == 0)
     return;
 
   const float range = v.chart_max - v.chart_min;
   const int plot_h = plot_h_px - 1; // drawable height range
+  const int last = static_cast<int>(v.chart_count) - 1;
+  bool have_prev = false;
   int prev_x = plot_x;
   int prev_y = plot_y + plot_h / 2;
 
   for (int x = 0; x < plot_w; ++x) {
-    const int sample_index =
-        (x * static_cast<int>(v.chart_count - 1)) / ((plot_w > 1) ? (plot_w - 1) : 1);
-    const float sample = v.chart_samples[sample_index];
+    // Position of this column along the samples, interpolated between the
+    // two nearest ones so sparse histories draw slopes, not steps.
+    const float pos = (plot_w > 1 && last > 0)
+                          ? static_cast<float>(x * last) / static_cast<float>(plot_w - 1)
+                          : 0.0f;
+    const int i0 = static_cast<int>(pos);
+    const int i1 = i0 < last ? i0 + 1 : i0;
+    const float a = v.chart_samples[i0];
+    const float b = v.chart_samples[i1];
+    float sample = a;
+    if (i1 != i0 && !std::isnan(a) && !std::isnan(b)) {
+      sample = a + (b - a) * (pos - static_cast<float>(i0));
+    } else if (std::isnan(a) && pos - static_cast<float>(i0) > 0.5f) {
+      sample = b; // the column sits nearer the next sample
+    }
+    if (std::isnan(sample)) {
+      have_prev = false;
+      continue;
+    }
 
     int y = plot_y + plot_h / 2;
     if (range > 0.001f) {
@@ -2581,9 +2600,12 @@ void DisplayService::_draw_chart(const DisplayValues &v, int plot_x, int plot_y,
       y = plot_y + plot_h;
 
     const int draw_x = plot_x + x;
-    if (x > 0) {
+    if (have_prev) {
       u8g2_DrawLine(&_u8g2, prev_x, prev_y, draw_x, y);
+    } else {
+      u8g2_DrawPixel(&_u8g2, draw_x, y);
     }
+    have_prev = true;
     prev_x = draw_x;
     prev_y = y;
   }

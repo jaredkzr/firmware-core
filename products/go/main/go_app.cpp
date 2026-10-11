@@ -30,6 +30,7 @@ enum esp_reset_reason_t { ESP_RST_UNKNOWN = 0 };
 inline esp_reset_reason_t esp_reset_reason() { return ESP_RST_UNKNOWN; }
 #endif
 #include "go_ble.h"
+#include "go_chart_history.h"
 #include "accel/accel_service.h"
 #include "go_buzzer.h"
 #include "go_cloud.h"
@@ -37,6 +38,7 @@ inline esp_reset_reason_t esp_reset_reason() { return ESP_RST_UNKNOWN; }
 #include "fg_learning/fg_learning_runner.h"
 #endif
 #include "go_events.h"
+#include "go_gas_index_rtc.h"
 #include "go_input.h"
 #include "go_local_api.h"
 #include "go_melody_sync.h"
@@ -59,6 +61,7 @@ inline esp_reset_reason_t esp_reset_reason() { return ESP_RST_UNKNOWN; }
 #include "services/local_server.h"
 #include "services/sensor_manager.h"
 
+#include <cinttypes>
 #include <ctime>
 
 static constexpr const char *TAG = "app";
@@ -66,6 +69,8 @@ static constexpr const char *TAG = "app";
 // HTTP host for WiFi pull OTA. Mirrors AgClient's (private) default cloud
 // domain; keep in sync with the Cloud service host.
 static constexpr const char *OTA_HTTP_DOMAIN = "hw.airgradient.com";
+/// Connect-window poll period for a phone connection or button press.
+static constexpr uint32_t BLE_WINDOW_POLL_MS = 20;
 
 // While a tracking session is active, the GPS receiver keeps tracking through
 // deep sleep (prepare_for_sleep idles it otherwise).
@@ -195,13 +200,18 @@ void GoApp::run() {
           static_cast<int>(state.tracking_state), state.tracking_session_id,
           state.has_flag(RtcAppFlag::SensorsWarm));
 
-  BootPath path = select_boot_path(cause, state, charging_only_eligible);
+  const bool ble_window_due =
+      PowerService::is_ble_window_wake(cause, state, RTOS::get_retained_time_ms());
+  BootPath path = select_boot_path(cause, state, charging_only_eligible, ble_window_due);
   switch (path) {
   case BootPath::ChargingOnly:
     run_charging_only(charging_status);
     break; // never reached
   case BootPath::FastPath:
     run_fast_path(state);
+    break; // never reached
+  case BootPath::BleWindow:
+    run_ble_window_path(state);
     break; // never reached
   case BootPath::ButtonWake:
     run_button_wake_path(state);
@@ -359,7 +369,7 @@ void GoApp::run_fast_path(const RtcAppState &state) {
     _board.display().deep_sleep();
     _board.ulp_start();
     log_heap(TAG, "boot:fast-path:before-sleep");
-    _board.power().enter_sleep(result.sleep_duration_ms);
+    _board.power().enter_sleep(result.sleep_duration_ms, result.ble_windows);
     // Never returns — CPU reboots on wake.
     return;
   }
@@ -379,8 +389,96 @@ void GoApp::run_fast_path(const RtcAppState &state) {
     result.handoff.fast_path_measures = &result.measures;
   }
 
-  AG_LOGI(TAG, "fast-path promoting to interactive (button=%d)", static_cast<int>(button_pressed));
+  AG_LOGI(TAG, "fast-path promoting to interactive (button=%d ble=%d)",
+          static_cast<int>(button_pressed),
+          static_cast<int>(result.handoff.portable_ble != nullptr));
   run_interactive(WakeCause::Timer, result.handoff);
+}
+
+// ===========================================================================
+// Portable BLE before the orchestrator (connect windows, fast path)
+// ===========================================================================
+
+PortableBle *GoApp::start_portable_ble(StorageService &storage) {
+  // Boot-lifetime objects, like the services run_interactive() builds: they
+  // live until the next deep sleep or are adopted by the orchestrator.
+  auto *serial = new std::string(_board.serial_number());
+  const char *firmware_version = _board.firmware_version();
+  auto *bundle = new PortableBle{};
+  bundle->event_queue = RTOS::queue_create(EVENT_QUEUE_DEPTH, sizeof(Event));
+  bundle->ble = new BleService(bundle->event_queue, storage, _board.ble_server());
+  // A transfer needs the orchestrator, by which time board.power() exists; a
+  // connect-window wake has not initialized it yet.
+  bundle->ota =
+      new OtaService(_board.ble_server(), [this]() { _board.power().reset_ext_watchdog(); },
+                     {
+                         .serial_number = serial->c_str(),
+                         .firmware_version = firmware_version,
+                         .http_domain = OTA_HTTP_DOMAIN,
+                     });
+  bundle->provisioner = new PortableWifiProvisioner(
+      bundle->event_queue, {_board.wifi_manager(), _board.ble_server(), _board},
+      make_portable_prov_config(serial->c_str(), firmware_version));
+  if (!start_portable_ble_services(*bundle->ble, *bundle->provisioner, *bundle->ota,
+                                   serial->c_str())) {
+    AG_LOGW(TAG, "portable BLE not started before interactive");
+    return nullptr;
+  }
+  return bundle;
+}
+
+// ===========================================================================
+// Connect-window wake (Portable Sleep, timer wake between measurements)
+// ===========================================================================
+
+void GoApp::run_ble_window_path(const RtcAppState &state) {
+  AG_LOGI(TAG, "run_ble_window_path: advertising for %" PRIu32 " ms", BLE_WINDOW_ADVERTISE_MS);
+  // Only NVS (BLE bonds, settings) and SPI (storage object) are needed. The
+  // LP core keeps feeding the external watchdog and the PM power GPIO hold
+  // stays latched, so nothing here has to be undone before sleeping again.
+  volatile bool button_pressed = false;
+  _board.install_button_isr(PIN_BUTTON_POWER, &button_pressed);
+  _board.init_nvs();
+  _board.init_spi();
+
+  PortableBle *ble = start_portable_ble(_board.storage_unmounted());
+  for (uint32_t waited_ms = 0; ble != nullptr && !ble->ble->is_connected() && !button_pressed &&
+                               waited_ms < BLE_WINDOW_ADVERTISE_MS;
+       waited_ms += BLE_WINDOW_POLL_MS) {
+    RTOS::delay_ms(BLE_WINDOW_POLL_MS);
+  }
+  _board.remove_button_isr(PIN_BUTTON_POWER);
+
+  const bool connected = ble != nullptr && ble->ble->is_connected();
+  if (!connected && !button_pressed) {
+    if (ble != nullptr) {
+      ble->ble->deinit();
+    }
+    PowerService::resume_ble_window_sleep(PIN_BUTTON_POWER);
+    return; // never reached on target
+  }
+
+  AG_LOGI(TAG, "connect window: promoting to interactive (phone=%d button=%d)",
+          static_cast<int>(connected), static_cast<int>(button_pressed));
+  // The orchestrator feeds the watchdog from here on.
+  _board.ulp_stop();
+
+  RtcDisplaySnapshot snapshot{};
+  const bool snapshot_valid = load_rtc_display_snapshot(&snapshot);
+  MeasuresAGo latest{};
+  const bool has_latest = _board.storage_unmounted().latest_cached(latest);
+
+  BootHandoff handoff{};
+  handoff.portable_ble = ble;
+  handoff.display_snapshot = snapshot_valid ? &snapshot : nullptr;
+  // The previous wake's measurement seeds BLE reads until a fresh one lands.
+  handoff.fast_path_measures = has_latest ? &latest : nullptr;
+  if (button_pressed) {
+    handoff.initial_lock_state = LockState::Unlocked;
+    handoff.suppress_wake_press = true;
+  }
+  (void)state;
+  run_interactive(button_pressed ? WakeCause::Button : WakeCause::Timer, handoff);
 }
 
 // ===========================================================================
@@ -406,6 +504,15 @@ GoApp::FastPathResult GoApp::execute_fast_path(const RtcAppState &state,
 
   GoSettings settings = _board.load_settings();
 
+  // Portable Sleep stays connectable during the measurement wake too: a phone
+  // that connects promotes the boot like a button press, but stays locked.
+  PortableBle *ble = nullptr;
+  if (state.mode == OperatingMode::Portable && settings.portable_sleep_enabled) {
+    ble = start_portable_ble(_board.storage_unmounted());
+  }
+  const auto phone_connected = [&ble]() { return ble != nullptr && ble->ble->is_connected(); };
+  const auto interrupted = [&]() { return button_pressed || phone_connected(); };
+
   SensorManager &sm = _board.sensors(state.has_flag(RtcAppFlag::SensorsWarm));
 
   bool promote = false;
@@ -423,7 +530,7 @@ GoApp::FastPathResult GoApp::execute_fast_path(const RtcAppState &state,
       uint64_t start = RTOS::get_time_ms();
       sm.warmup_step();
 
-      if (button_pressed) {
+      if (interrupted()) {
         promote = true;
         break;
       }
@@ -432,7 +539,7 @@ GoApp::FastPathResult GoApp::execute_fast_path(const RtcAppState &state,
       if (elapsed < CONFIG_SENSOR_WARMUP_INTERVAL_MS) {
         RTOS::delay_ms(static_cast<uint32_t>(CONFIG_SENSOR_WARMUP_INTERVAL_MS - elapsed));
       }
-      if (button_pressed) {
+      if (interrupted()) {
         promote = true;
         break;
       }
@@ -443,10 +550,18 @@ GoApp::FastPathResult GoApp::execute_fast_path(const RtcAppState &state,
   MeasuresAGo ago{};
   bool has_measures = false;
   if (!promote) {
+    // One gas sample per wake: resume the algorithm the previous wake saved
+    // in RTC so the index keeps its learned baseline (a fresh algorithm would
+    // still be in its 45 s blackout), then save it again for the next wake.
+    const uint32_t gas_sample_s = tracking_seconds_from_ms(RTOS::get_retained_time_ms());
+    const bool gas_index_ready = resume_gas_index_for_sample(
+        sm, gas_sample_s, static_cast<uint32_t>(settings.measure_interval_seconds) * 1000,
+        settings.tvoc_learning_offset, settings.nox_learning_offset);
     Measures measures = sm.start_measures(1, SensorGroup::All);
-    // The fast path never runs the gas-index algorithm (no SensorProducer),
-    // so TVOC/NOx index fields stay at invalid sentinels: Home shows "-" and
-    // route points store no index. Raw ticks remain in tvoc_raw/nox_raw.
+    TvocNoxIndexState gas_state{};
+    if (gas_index_ready && sm.get_tvoc_nox_index_state(gas_state)) {
+      save_rtc_gas_index(gas_state, gas_sample_s);
+    }
     ago = measures_to_ago(measures);
     has_measures = true;
     AG_LOGI(TAG,
@@ -455,7 +570,7 @@ GoApp::FastPathResult GoApp::execute_fast_path(const RtcAppState &state,
             ago.temp_hum_a.temperature, ago.temp_hum_a.humidity, ago.pm_a.pm_25, ago.co2.co2,
             ago.tvoc_nox.tvoc_index, ago.tvoc_nox.nox_index, ago.tvoc_nox.tvoc_raw,
             ago.tvoc_nox.nox_raw, ago.pressure.pressure);
-    if (button_pressed) {
+    if (interrupted()) {
       promote = true;
     }
   }
@@ -470,7 +585,7 @@ GoApp::FastPathResult GoApp::execute_fast_path(const RtcAppState &state,
     AG_LOGI(TAG, "fast-path: gps fix_type=%d sat=%d lat=%.6f lon=%.6f alt=%.1f hdop=%.1f",
             static_cast<int>(gps.fix.fix_type), gps.fix.satellite_count, gps.position.latitude,
             gps.position.longitude, gps.altitude_m, gps.fix.hdop);
-    if (button_pressed) {
+    if (interrupted()) {
       promote = true;
     }
   }
@@ -481,11 +596,14 @@ GoApp::FastPathResult GoApp::execute_fast_path(const RtcAppState &state,
   // painted. tracking_state is left intact in RTC so the orchestrator's
   // init() retries resume_route() and surfaces persistent faults there.
   bool storage_failure_promote = false;
+  bool display_painted = false;
   bool power_polled = false;
   PowerSnapshot power_snapshot{};
   if (!promote) {
     StorageService &stor = _board.storage();
     stor.cache_measurement(ago);
+    rtc_chart_history().record(apply_measurement_corrections(ago, settings.corrections),
+                               tracking_seconds_from_ms(RTOS::get_retained_time_ms()));
 
     if (state.tracking_state == TrackingState::Recording) {
       // Fast path can only resume — only prepare_for_sleep sets tracking_state.
@@ -555,13 +673,17 @@ GoApp::FastPathResult GoApp::execute_fast_path(const RtcAppState &state,
     }
     disp.init(values, /* defer_refresh= */ false, painted_ptr);
     save_rtc_display_snapshot(values);
+    display_painted = true;
 
     uint32_t awake_ms = static_cast<uint32_t>(RTOS::get_time_ms()) - boot_time_ms;
-    // The fast path never starts BLE, so a Portable sleep cycle has no link to keep.
+    // A phone that connected during this wake keeps it awake (promotion).
     auto decision = pwr.decide_sleep(settings, LockState::Locked, state.mode, awake_ms,
-                                     /*ble_link_active=*/false);
+                                     /*ble_link_active=*/phone_connected());
 
     if (decision.type == PowerService::SleepType::Deep) {
+      if (ble != nullptr) {
+        ble->ble->deinit();
+      }
       const bool warm = pwr.should_hold_pm_sensor(decision.duration_ms);
       if (!warm) {
         // Long sleep: stop the PM fan and idle the always-powered I2C sensors
@@ -578,6 +700,7 @@ GoApp::FastPathResult GoApp::execute_fast_path(const RtcAppState &state,
           .sleep_duration_ms = decision.duration_ms,
           .sensors_warm = warm,
           .tracking_timing = tracking_timing,
+          .ble_windows = decision.ble_windows,
       };
     }
     // Sleep too short — fall through to promotion.
@@ -596,9 +719,17 @@ GoApp::FastPathResult GoApp::execute_fast_path(const RtcAppState &state,
   handoff.measurement_completed = has_measures;
   // fast_path_measures left null — caller wires the pointer (see note above)
 
+  handoff.portable_ble = ble;
+
   if (button_caused) {
     handoff.initial_lock_state = LockState::Unlocked;
     handoff.suppress_wake_press = true;
+    handoff.display_snapshot = snapshot_valid ? snapshot : nullptr;
+    handoff.display_painted = false;
+  } else if (phone_connected() && !display_painted) {
+    // A phone connected before this wake painted: stay locked and let
+    // interactive repaint from the previous frame.
+    handoff.initial_lock_state = LockState::Locked;
     handoff.display_snapshot = snapshot_valid ? snapshot : nullptr;
     handoff.display_painted = false;
   } else {
@@ -739,6 +870,9 @@ void GoApp::run_button_wake_path(const RtcAppState &state) {
   // Determine whether GPS should be active based on settings and RTC state.
   const bool gps_active = is_gps_active_at_boot(settings, state);
 
+  // Resume the gas-index baseline the last fast-path wake or sleep entry saved.
+  (void)resume_gas_index_for_sampler(sm, tracking_seconds_from_ms(RTOS::get_retained_time_ms()));
+
   // Start producer tasks — touch and sensors operational from here (~310 ms)
   sensor_producer->start();
   if (gps_active) {
@@ -862,9 +996,13 @@ void GoApp::run_interactive(WakeCause cause, BootHandoff handoff) {
     DisplayValues painted{};
     const DisplayValues *painted_ptr = nullptr;
     if (handoff.display_snapshot != nullptr) {
-      initial_values = build_wake_values(*handoff.display_snapshot, true);
       painted = display_values_from_snapshot(*handoff.display_snapshot);
       painted_ptr = &painted;
+      // A locked promotion (a phone connected) keeps the panel as it is; only
+      // an unlock repaints it as the unlocked Home.
+      initial_values = handoff.initial_lock_state == LockState::Locked
+                           ? painted
+                           : build_wake_values(*handoff.display_snapshot, true);
     } else {
       initial_values = build_boot_splash_values();
       boot_splash_requested = true;
@@ -914,7 +1052,12 @@ void GoApp::run_interactive(WakeCause cause, BootHandoff handoff) {
   StorageService &stor = _board.storage();
 
   // --- Event queue ---
-  RtosQueueHandle event_queue = RTOS::queue_create(EVENT_QUEUE_DEPTH, sizeof(Event));
+  // Adopt the queue of BLE services a boot path already started, so events
+  // posted while a phone connected reach the orchestrator.
+  const PortableBle *early_ble = handoff.portable_ble;
+  RtosQueueHandle event_queue = early_ble != nullptr
+                                    ? early_ble->event_queue
+                                    : RTOS::queue_create(EVENT_QUEUE_DEPTH, sizeof(Event));
 
   std::string serial = _board.serial_number();
   const char *firmware_version = _board.firmware_version();
@@ -934,7 +1077,8 @@ void GoApp::run_interactive(WakeCause cause, BootHandoff handoff) {
   // Borrow the shared AgBleServer from the board so Stationary
   // provisioning can later reuse the same instance under orchestrator-
   // enforced mutual exclusion.
-  auto *ble_service = new BleService(event_queue, stor, _board.ble_server());
+  auto *ble_service = early_ble != nullptr ? early_ble->ble
+                                           : new BleService(event_queue, stor, _board.ble_server());
 
   // --- WifiService ---
   auto *stationary_strings = new StationaryStrings(make_stationary_strings(serial));
@@ -945,8 +1089,10 @@ void GoApp::run_interactive(WakeCause cause, BootHandoff handoff) {
 
   // --- PortableWifiProvisioner (attached Portable Wi-Fi provisioning) ---
   auto *portable_provisioner =
-      new PortableWifiProvisioner(event_queue, {_board.wifi_manager(), _board.ble_server(), _board},
-                                  make_portable_prov_config(serial.c_str(), firmware_version));
+      early_ble != nullptr ? early_ble->provisioner
+                           : new PortableWifiProvisioner(
+                                 event_queue, {_board.wifi_manager(), _board.ble_server(), _board},
+                                 make_portable_prov_config(serial.c_str(), firmware_version));
 
   // --- CloudService (inert until start()) ---
   auto *cloud_service =
@@ -992,12 +1138,14 @@ void GoApp::run_interactive(WakeCause cause, BootHandoff handoff) {
   }
 
   // --- OtaService (borrows the shared server + PowerService; owns the writer) ---
-  auto *ota_service = new OtaService(_board.ble_server(), pwr,
-                                     {
-                                         .serial_number = serial.c_str(),
-                                         .firmware_version = firmware_version,
-                                         .http_domain = OTA_HTTP_DOMAIN,
-                                     });
+  auto *ota_service = early_ble != nullptr
+                          ? early_ble->ota
+                          : new OtaService(_board.ble_server(), pwr,
+                                           {
+                                               .serial_number = serial.c_str(),
+                                               .firmware_version = firmware_version,
+                                               .http_domain = OTA_HTTP_DOMAIN,
+                                           });
 
   // Boot animation — runs after the splash refresh is scheduled so the screen
   // can update in parallel with the chime/LED.
@@ -1026,6 +1174,11 @@ void GoApp::run_interactive(WakeCause cause, BootHandoff handoff) {
   const bool gps_active = is_gps_active_at_boot(settings, boot_state);
 
   // --- Start producer tasks ---
+  // A fast-path promotion already holds the algorithm; a cold wake resumes the
+  // gas-index baseline saved before sleep.
+  if (cause != WakeCause::PowerOn) {
+    (void)resume_gas_index_for_sampler(sm, tracking_seconds_from_ms(RTOS::get_retained_time_ms()));
+  }
   sensor_producer->start();
   if (gps_active) {
     gps_service->start();
@@ -1070,13 +1223,14 @@ void GoApp::run_interactive(WakeCause cause, BootHandoff handoff) {
 // Pure utility functions
 // ===========================================================================
 
-BootPath select_boot_path(WakeCause cause, const RtcAppState &state, bool charging_only_eligible) {
+BootPath select_boot_path(WakeCause cause, const RtcAppState &state, bool charging_only_eligible,
+                          bool ble_window_due) {
   if (charging_only_eligible || state.has_flag(RtcAppFlag::ChargingOnlyRequested)) {
     return BootPath::ChargingOnly;
   }
   if (cause == WakeCause::Timer) {
     if (PowerService::is_fast_path_wake(cause, state)) {
-      return BootPath::FastPath;
+      return ble_window_due ? BootPath::BleWindow : BootPath::FastPath;
     }
   }
   // Portable reaches deep sleep only with portable_sleep_enabled; its button
