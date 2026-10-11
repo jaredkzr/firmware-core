@@ -6,6 +6,7 @@
 
 #include "go_display_geometry.h"
 #include "go_types.h"
+#include "go_display_refresh.h"
 #include "measures_types.h"
 #include "rtos.h"
 #include "services/provisioning_qr.h"
@@ -216,8 +217,10 @@ struct DisplayValues {
 };
 
 // ---------------------------------------------------------------------------
-// RTC display snapshot — saved before deep sleep, loaded on button wake.
-// Scalar data only; no pointers.  Estimated size: ~50 bytes.
+// RTC display snapshot — saved after the last paint before deep sleep, loaded
+// on wake. Scalar data only; no pointers.  Estimated size: ~50 bytes.
+// display_values_from_snapshot() rebuilds the saved frame exactly when the
+// frame used no fields beyond these (fast-path frames, locked Home).
 // ---------------------------------------------------------------------------
 
 struct RtcDisplaySnapshot {
@@ -234,8 +237,10 @@ struct RtcDisplaySnapshot {
   // Battery
   uint8_t battery_pct;
   bool is_battery_charging;
+  bool is_plugged_in;
 
   // Status flags
+  bool locked;
   bool gps_enabled;
   bool gps_fix;
   TrackingState tracking_state;
@@ -246,6 +251,61 @@ struct RtcDisplaySnapshot {
   bool use_feet;
   bool pm_use_usaqi;
 };
+
+/// Captures the scalar fields of a painted frame for RTC storage.
+inline RtcDisplaySnapshot snapshot_from_display_values(const DisplayValues &values) {
+  RtcDisplaySnapshot s{};
+  s.co2_ppm = values.co2_ppm;
+  s.pm25_ugm3 = values.pm25_ugm3;
+  s.temperature_c = values.temperature_c;
+  s.humidity_pct = values.humidity_pct;
+  s.tvoc_index = values.tvoc_index;
+  s.nox_index = values.nox_index;
+  s.pressure_hpa = values.pressure_hpa;
+  s.altitude_m = values.altitude_m;
+  s.battery_pct = values.battery_pct;
+  s.is_battery_charging = values.is_battery_charging;
+  s.is_plugged_in = values.is_plugged_in;
+  s.locked = values.locked;
+  s.gps_enabled = values.gps_enabled;
+  s.gps_fix = values.gps_fix;
+  s.tracking_state = values.tracking_state;
+  s.ble_enabled = values.ble_enabled;
+  s.use_fahrenheit = values.use_fahrenheit;
+  s.use_feet = values.use_feet;
+  s.pm_use_usaqi = values.pm_use_usaqi;
+  return s;
+}
+
+/// Rebuilds the DisplayValues a snapshot was saved from. Fields the snapshot
+/// does not carry keep their DisplayValues defaults, so the result renders
+/// the saved frame exactly only when that frame did not depend on them;
+/// DisplayService verifies this against the RTC frame hash before relying on it.
+inline DisplayValues display_values_from_snapshot(const RtcDisplaySnapshot &snapshot) {
+  DisplayValues v{};
+  v.co2_ppm = snapshot.co2_ppm;
+  v.pm25_ugm3 = snapshot.pm25_ugm3;
+  v.temperature_c = snapshot.temperature_c;
+  v.humidity_pct = snapshot.humidity_pct;
+  v.tvoc_index = snapshot.tvoc_index;
+  v.nox_index = snapshot.nox_index;
+  v.pressure_hpa = snapshot.pressure_hpa;
+  v.altitude_m = snapshot.altitude_m;
+  v.battery_pct = snapshot.battery_pct;
+  v.is_battery_charging = snapshot.is_battery_charging;
+  v.is_plugged_in = snapshot.is_plugged_in;
+  v.locked = snapshot.locked;
+  v.gps_enabled = snapshot.gps_enabled;
+  v.gps_fix = snapshot.gps_fix;
+  v.tracking_state = snapshot.tracking_state;
+  v.ble_enabled = snapshot.ble_enabled;
+  v.use_fahrenheit = snapshot.use_fahrenheit;
+  v.use_feet = snapshot.use_feet;
+  v.pm_use_usaqi = snapshot.pm_use_usaqi;
+  v.screen = Screen::Home;
+  v.display_off = false;
+  return v;
+}
 
 // ---------------------------------------------------------------------------
 // DisplayService (hardware-dependent, excluded from host builds)
@@ -258,13 +318,6 @@ struct RtcDisplaySnapshot {
 extern "C" {
 #include "u8g2.h"
 }
-
-/// Display refresh tier — controls how the e-paper controller updates.
-enum class RefreshMode : uint8_t {
-  Full,    ///< Full GC waveform (flash). Resets basemap in both RAM planes.
-  Fast,    ///< Full-screen differential (no flash). Writes full frame to RAM 0x24.
-  Partial, ///< Body-only differential (no flash). Writes body region to RAM 0x24.
-};
 
 class DisplayService {
 public:
@@ -281,8 +334,10 @@ public:
     uint16_t task_stack_size = 4096;
     uint8_t task_priority = 4;
 
-    // Refresh limits
-    uint8_t max_partial_ops = 20;
+    // Ghosting cleanup — see go_display_refresh::CleanupPolicy
+    uint8_t max_partial_ops = 60;     // ~10 min of 10 s updates if the device never locks
+    uint8_t lock_cleanup_min_ops = 5; // skip the lock flash after only a few partials
+    uint8_t max_fast_cleanups = 5;    // every 6th cleanup is a Full
   };
 
   explicit DisplayService(const Config &config);
@@ -298,7 +353,13 @@ public:
   /// first job.  Returns in ~10 ms without waiting for the e-paper refresh.
   /// The worker holds the SPI bus for the duration (~3 s), naturally
   /// serializing any other SPI device (NAND) without explicit coordination.
-  bool init(const DisplayValues &initial, bool defer_refresh = false);
+  ///
+  /// `painted` (optional) describes the frame believed to be on the panel from
+  /// before deep sleep. If its render matches the hash saved in RTC memory at
+  /// paint time, the first refresh is a flash-free Partial against it instead
+  /// of a Full.
+  bool init(const DisplayValues &initial, bool defer_refresh = false,
+            const DisplayValues *painted = nullptr);
 
   /// Submit a new frame for display.
   /// Renders into framebuffer (fast), then signals worker task.
@@ -318,6 +379,11 @@ public:
   /// returns to its loop).  Safe from any other task, including the
   /// orchestrator task — the only caller in this product.
   void flush();
+
+  /// Run the ghosting cleanup (Fast, or Full every few cleanups) on the next
+  /// update() if enough Partials have accumulated. Called when the device
+  /// locks, so the flash happens as the user looks away.
+  void request_cleanup() { _cleanup_requested = true; }
 
   /// Clear display to white (full refresh). Blocking.
   void clear();
@@ -341,10 +407,19 @@ private:
 
   // Refresh state
   DisplayValues _prev_values;
-  uint8_t _diff_count = 0;
+  uint8_t _partial_count = 0; // Partials since the last Fast/Full (written by the worker)
+  uint8_t _fast_count = 0;    // Fast refreshes since the last Full (written by the worker)
   RefreshMode _pending_mode = RefreshMode::Full;
-  bool _defer_header_check = false;
-  bool _menu_exited = false;
+  bool _pending_full_canvas = false; // Partial writes y=0..249 instead of the body
+  bool _cleanup_requested = false;
+
+  // Panel content as of the last queued refresh. The header rows decide
+  // whether a Partial must widen to full canvas; the hash skips refreshes of
+  // an identical frame. _panel_known is false until the first paint and after
+  // a failed refresh, which disables both shortcuts.
+  uint8_t _panel_header[go_display_geometry::HEADER_BYTES];
+  uint32_t _panel_hash = 0;
+  bool _panel_known = false;
 
   // Worker task
   RtosTaskHandle _task_handle = nullptr;
@@ -353,10 +428,17 @@ private:
 
   bool _claim_framebuffer(bool wait);
   void _release_framebuffer();
+  go_display_refresh::CleanupPolicy _cleanup_policy() const;
+
+  // Drives one refresh of _render_buf (bus must be held), updates the refresh
+  // counters, and records the painted frame in RTC memory.
+  esp_err_t _paint(RefreshMode mode, bool full_canvas);
+  bool _run_sync(RefreshMode mode, bool full_canvas, const char *what);
 
   // Render methods
   void _render_frame(const DisplayValues &v);
-  bool _is_header_changed(const DisplayValues &a, const DisplayValues &b) const;
+  bool _is_header_changed() const;
+  void _latch_panel(uint32_t hash);
 
   void _draw_status_bar(const DisplayValues &v);
   void _draw_home(const DisplayValues &v);
@@ -405,7 +487,8 @@ public:
 
   explicit DisplayService(const Config &) {}
 
-  bool init(const DisplayValues &values, bool defer_refresh = false) {
+  bool init(const DisplayValues &values, bool defer_refresh = false,
+            const DisplayValues * = nullptr) {
     ++spy_init_count;
     spy_last_screen = values.screen;
     spy_last_init_deferred = defer_refresh;
@@ -428,6 +511,7 @@ public:
     spy_last_screen = values.screen;
   }
   void flush() { ++spy_flush_count; }
+  void request_cleanup() { ++spy_cleanup_request_count; }
   void clear() {}
   void deep_sleep() { spy_deep_sleep_called = true; }
   void stop() {}
@@ -438,6 +522,7 @@ public:
   inline static uint32_t spy_update_count = 0;
   inline static uint32_t spy_sync_update_count = 0;
   inline static uint32_t spy_flush_count = 0;
+  inline static uint32_t spy_cleanup_request_count = 0;
   inline static Screen spy_last_screen = Screen::Home;
   inline static bool spy_last_init_deferred = false;
   inline static bool spy_last_update_wait = false;

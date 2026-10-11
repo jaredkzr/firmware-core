@@ -1668,6 +1668,29 @@ TEST_CASE("lock: always waits for a busy display regardless of screen or auto-lo
   }
 }
 
+TEST_CASE("lock: requests the display ghosting cleanup before repainting",
+          "[Orchestrator][state]") {
+  TestFixture f;
+  auto orch = f.make_orchestrator();
+  A::unlock(orch);
+
+  test_spy::reset();
+  A::lock(orch);
+
+  CHECK(DisplayService::spy_cleanup_request_count == 1);
+  CHECK(DisplayService::spy_update_count > 0);
+}
+
+TEST_CASE("unlock: does not request the display ghosting cleanup", "[Orchestrator][state]") {
+  TestFixture f;
+  auto orch = f.make_orchestrator();
+
+  test_spy::reset();
+  A::unlock(orch);
+
+  CHECK(DisplayService::spy_cleanup_request_count == 0);
+}
+
 TEST_CASE("unlock: sets Unlocked state", "[Orchestrator][state]") {
   TestFixture f;
   auto orch = f.make_orchestrator();

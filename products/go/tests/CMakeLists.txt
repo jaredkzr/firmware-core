@@ -960,3 +960,21 @@ target_include_directories(go_lis2dh12_tests PRIVATE
 target_compile_definitions(go_lis2dh12_tests PRIVATE TEST_HOST)
 target_link_libraries(go_lis2dh12_tests PRIVATE Catch2::Catch2WithMain)
 catch_discover_tests(go_lis2dh12_tests)
+
+# ---------------------------------------------------------------------------
+# go_display_refresh tests (pure-function, header-only)
+# ---------------------------------------------------------------------------
+
+add_executable(go_display_refresh_tests
+    go_display_refresh.tests.cpp
+)
+
+target_include_directories(go_display_refresh_tests PRIVATE
+    "${AIRGRADIENT_REPO_ROOT}/products/go/main"
+)
+
+target_link_libraries(go_display_refresh_tests PRIVATE
+    Catch2::Catch2WithMain
+)
+
+catch_discover_tests(go_display_refresh_tests)

@@ -532,6 +532,11 @@ GoApp::FastPathResult GoApp::execute_fast_path(const RtcAppState &state,
     DisplayService &disp = _board.display();
     DisplayValues values =
         build_fast_path_display(ago, gps, power_snapshot, settings, state.tracking_state);
+    // The previous fast-path wake saved its frame; if it is still on the panel
+    // the display diffs against it with a flash-free Partial.
+    const DisplayValues painted =
+        snapshot_valid ? display_values_from_snapshot(*snapshot) : DisplayValues{};
+    const DisplayValues *painted_ptr = snapshot_valid ? &painted : nullptr;
     if (power_snapshot.ship_mode_request == ShipModeRequest::OverTemperature ||
         power_snapshot.ship_mode_request == ShipModeRequest::UnderTemperature) {
       values.screen = power_snapshot.ship_mode_request == ShipModeRequest::UnderTemperature
@@ -548,7 +553,8 @@ GoApp::FastPathResult GoApp::execute_fast_path(const RtcAppState &state,
           .tracking_timing = {},
       };
     }
-    disp.init(values);
+    disp.init(values, /* defer_refresh= */ false, painted_ptr);
+    save_rtc_display_snapshot(values);
 
     uint32_t awake_ms = static_cast<uint32_t>(RTOS::get_time_ms()) - boot_time_ms;
     // The fast path never starts BLE, so a Portable sleep cycle has no link to keep.
@@ -641,9 +647,12 @@ void GoApp::run_button_wake_path(const RtcAppState &state) {
           snapshot.ble_enabled, snapshot.use_fahrenheit, snapshot.use_feet, snapshot.pm_use_usaqi);
 
   DisplayValues wake_values = build_wake_values(snapshot, snapshot_valid);
+  const DisplayValues painted =
+      snapshot_valid ? display_values_from_snapshot(snapshot) : DisplayValues{};
 
-  // Returns in ~10 ms.  Worker task handles the SPI full refresh (~3 s).
-  disp.init(wake_values, /* defer_refresh= */ true);
+  // Returns in ~10 ms.  The worker runs the refresh: a Partial when the
+  // snapshot frame is verifiably still on the panel, otherwise Full (~3 s).
+  disp.init(wake_values, /* defer_refresh= */ true, snapshot_valid ? &painted : nullptr);
 
   // Stop LP Core after SPI/display init, before I2C init.
   _board.ulp_stop();
@@ -850,14 +859,18 @@ void GoApp::run_interactive(WakeCause cause, BootHandoff handoff) {
     DisplayService &early_display = _board.display();
 
     DisplayValues initial_values{};
+    DisplayValues painted{};
+    const DisplayValues *painted_ptr = nullptr;
     if (handoff.display_snapshot != nullptr) {
       initial_values = build_wake_values(*handoff.display_snapshot, true);
+      painted = display_values_from_snapshot(*handoff.display_snapshot);
+      painted_ptr = &painted;
     } else {
       initial_values = build_boot_splash_values();
       boot_splash_requested = true;
     }
 
-    early_display.init(initial_values, /* defer_refresh= */ true);
+    early_display.init(initial_values, /* defer_refresh= */ true, painted_ptr);
     handoff.display_painted = true;
   }
 
@@ -1153,27 +1166,7 @@ DisplayValues build_boot_splash_values() {
 }
 
 DisplayValues build_wake_values(const RtcDisplaySnapshot &snapshot, bool snapshot_valid) {
-  DisplayValues v{};
-
-  if (snapshot_valid) {
-    v.co2_ppm = snapshot.co2_ppm;
-    v.pm25_ugm3 = snapshot.pm25_ugm3;
-    v.temperature_c = snapshot.temperature_c;
-    v.humidity_pct = snapshot.humidity_pct;
-    v.tvoc_index = snapshot.tvoc_index;
-    v.nox_index = snapshot.nox_index;
-    v.pressure_hpa = snapshot.pressure_hpa;
-    v.altitude_m = snapshot.altitude_m;
-    v.battery_pct = snapshot.battery_pct;
-    v.is_battery_charging = snapshot.is_battery_charging;
-    v.gps_enabled = snapshot.gps_enabled;
-    v.gps_fix = snapshot.gps_fix;
-    v.tracking_state = snapshot.tracking_state;
-    v.ble_enabled = snapshot.ble_enabled;
-    v.use_fahrenheit = snapshot.use_fahrenheit;
-    v.use_feet = snapshot.use_feet;
-    v.pm_use_usaqi = snapshot.pm_use_usaqi;
-  }
+  DisplayValues v = snapshot_valid ? display_values_from_snapshot(snapshot) : DisplayValues{};
 
   v.screen = Screen::Home;
   v.locked = false;

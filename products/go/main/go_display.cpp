@@ -36,24 +36,22 @@ static constexpr const char *TAG = "go_display";
 RTC_DATA_ATTR static RtcDisplaySnapshot s_rtc_display_snapshot;
 RTC_DATA_ATTR static bool s_rtc_display_snapshot_valid = false;
 
+// What the panel physically shows, recorded after every successful refresh.
+// E-paper keeps its image through deep sleep, so on wake DisplayService can
+// verify a candidate "painted" frame against frame_hash and refresh with a
+// Partial instead of a Full. The counters carry the ghosting-cleanup cadence
+// across fast-path wakes. Zero-initialized (invalid) on first power-on.
+struct RtcPanelRecord {
+  uint32_t frame_hash;
+  uint8_t partial_count;
+  uint8_t fast_count;
+  bool valid;
+};
+
+RTC_DATA_ATTR static RtcPanelRecord s_rtc_panel_record;
+
 void save_rtc_display_snapshot(const DisplayValues &values) {
-  s_rtc_display_snapshot.co2_ppm = values.co2_ppm;
-  s_rtc_display_snapshot.pm25_ugm3 = values.pm25_ugm3;
-  s_rtc_display_snapshot.temperature_c = values.temperature_c;
-  s_rtc_display_snapshot.humidity_pct = values.humidity_pct;
-  s_rtc_display_snapshot.tvoc_index = values.tvoc_index;
-  s_rtc_display_snapshot.nox_index = values.nox_index;
-  s_rtc_display_snapshot.pressure_hpa = values.pressure_hpa;
-  s_rtc_display_snapshot.altitude_m = values.altitude_m;
-  s_rtc_display_snapshot.battery_pct = values.battery_pct;
-  s_rtc_display_snapshot.is_battery_charging = values.is_battery_charging;
-  s_rtc_display_snapshot.gps_enabled = values.gps_enabled;
-  s_rtc_display_snapshot.gps_fix = values.gps_fix;
-  s_rtc_display_snapshot.tracking_state = values.tracking_state;
-  s_rtc_display_snapshot.ble_enabled = values.ble_enabled;
-  s_rtc_display_snapshot.use_fahrenheit = values.use_fahrenheit;
-  s_rtc_display_snapshot.use_feet = values.use_feet;
-  s_rtc_display_snapshot.pm_use_usaqi = values.pm_use_usaqi;
+  s_rtc_display_snapshot = snapshot_from_display_values(values);
   s_rtc_display_snapshot_valid = true;
 }
 
@@ -122,6 +120,12 @@ void delay_ms(uint32_t ms) {
 // Poll cadence must be >= 1 tick; a sub-tick delay degrades to vTaskDelay(0)
 // (bare yield), starving the lower-priority LED/buzzer tasks during refresh.
 static constexpr uint32_t BUSY_POLL_MS = 10;
+
+// Border waveform control (0x3C) values. The border is the ink ring outside
+// the active area; it must be set on every path that SW-resets the controller,
+// or it is left at the POR default (0xC0, HiZ) and drifts with stray fields.
+constexpr uint8_t BORDER_WAVEFORM_FULL = 0x05;    // follow LUT1 (ends white)
+constexpr uint8_t BORDER_WAVEFORM_PARTIAL = 0x80; // hold at VCOM (no drive)
 
 // BUSY=1 means controller processing; BUSY=0 means ready.
 void wait_busy_low() {
@@ -294,7 +298,7 @@ esp_err_t driver_hw_init_full() {
 
   // Border waveform (full mode)
   DISP_RETURN_ON_ERR(write_cmd(0x3C));
-  DISP_RETURN_ON_ERR(write_data(0x05));
+  DISP_RETURN_ON_ERR(write_data(BORDER_WAVEFORM_FULL));
 
   // Display update control
   DISP_RETURN_ON_ERR(write_cmd(0x21));
@@ -316,6 +320,15 @@ esp_err_t driver_hw_init_full() {
   wait_busy_low();
 
   return ESP_OK;
+}
+
+// Write a frame into the previous-image RAM plane (0x26) only, without a
+// refresh. Partial updates diff 0x24 against 0x26, so this restores the
+// basemap after deep sleep. Call right after driver_hw_init_full(), which
+// leaves the RAM window and cursor covering the full frame.
+esp_err_t driver_write_previous_plane(const uint8_t *data) {
+  DISP_RETURN_ON_ERR(write_cmd(0x26));
+  return write_data_bytes(data, FRAME_BYTES);
 }
 
 // Write frame to both SSD1680 RAM planes + trigger full update.
@@ -350,7 +363,7 @@ esp_err_t driver_part_begin() {
 
   // Border waveform (partial mode — differs from full init)
   DISP_RETURN_ON_ERR(write_cmd(0x3C));
-  DISP_RETURN_ON_ERR(write_data(0x80));
+  DISP_RETURN_ON_ERR(write_data(BORDER_WAVEFORM_PARTIAL));
 
   // Data entry mode (same as full init)
   DISP_RETURN_ON_ERR(write_cmd(0x11));
@@ -405,11 +418,13 @@ esp_err_t driver_part_commit() {
 }
 
 // ---------------------------------------------------------------------------
-// Fast refresh (0xC7 waveform) — full-screen, no flash
+// Fast refresh (0xC7 waveform) — full-screen, single inversion
 // ---------------------------------------------------------------------------
 // Uses a temperature-override trick: force the SSD1680 to load the OTP LUT
 // for 100 °C, which selects a shorter, more aggressive waveform. The 0xC7
-// trigger then drives all pixels unconditionally (non-differential).
+// trigger then drives all pixels unconditionally (display mode 1, the same
+// GC waveform family as Full), so the panel still visibly inverts. Use Partial
+// when the goal is to avoid a flash.
 
 // Initialize controller for fast refresh mode.
 // Must be called before driver_fast_write() + driver_fast_commit().
@@ -419,6 +434,7 @@ esp_err_t driver_hw_init_fast() {
   delay_ms(10);
   set_rst(1);
   delay_ms(10);
+  wait_busy_low();
 
   // Software reset (clears all registers to defaults)
   DISP_RETURN_ON_ERR(write_cmd(0x12));
@@ -469,6 +485,10 @@ esp_err_t driver_hw_init_fast() {
   DISP_RETURN_ON_ERR(write_data(static_cast<uint8_t>((HEIGHT_PX - 1) / 256)));
   DISP_RETURN_ON_ERR(write_data(0x00));
   DISP_RETURN_ON_ERR(write_data(0x00));
+
+  // Border waveform: SW reset left it HiZ; match the full init.
+  DISP_RETURN_ON_ERR(write_cmd(0x3C));
+  DISP_RETURN_ON_ERR(write_data(BORDER_WAVEFORM_FULL));
 
   // RAM-X counter to 0
   DISP_RETURN_ON_ERR(write_cmd(0x4E));
@@ -688,8 +708,9 @@ bool is_shutdown_screen(Screen screen) {
 }
 
 // A "navigable" screen is one the user reaches through normal menu interaction.
-// Transitions between navigable screens use body-only partial for snappy UX.
-// Screens NOT listed here (PairingPasskey, Shutdown*) trigger Fast on transition.
+// Transitions between navigable screens use Partial for snappy UX (full canvas
+// when the status bar changed). Screens NOT listed here (PairingPasskey,
+// Shutdown*) trigger Fast on transition.
 bool is_navigable(Screen screen) { return is_home_like(screen) || is_list_screen(screen); }
 
 // A "menu-navigation" screen is any navigable screen except Home.
@@ -718,6 +739,22 @@ bool metric_uses_chart_panel(Metric metric) {
   default:
     return false;
   }
+}
+
+const char *refresh_mode_name(RefreshMode mode) {
+  switch (mode) {
+  case RefreshMode::Full:
+    return "Full";
+  case RefreshMode::Fast:
+    return "Fast";
+  case RefreshMode::Partial:
+    return "Partial";
+  }
+  return "?";
+}
+
+uint32_t render_hash(const uint8_t *buf) {
+  return go_display_refresh::frame_hash(buf, go_display_geometry::PHYSICAL_BYTES);
 }
 
 bool is_float_non_negative(float value) { return value >= 0.0f; }
@@ -1313,11 +1350,12 @@ void draw_list_rows(u8g2_t *u, const DisplayValues &v, bool full_screen) {
 // ===========================================================================
 
 DisplayService::DisplayService(const Config &config)
-    : _config(config), _u8g2{}, _render_buf{}, _prev_values{}, _diff_count(0),
-      _pending_mode(RefreshMode::Full), _task_handle(nullptr), _running(false),
+    : _config(config), _u8g2{}, _render_buf{}, _prev_values{}, _partial_count(0), _fast_count(0),
+      _pending_mode(RefreshMode::Full), _panel_header{}, _task_handle(nullptr), _running(false),
       _worker_busy(false) {}
 
-bool DisplayService::init(const DisplayValues &initial, bool defer_refresh) {
+bool DisplayService::init(const DisplayValues &initial, bool defer_refresh,
+                          const DisplayValues *painted) {
   esp_err_t err = driver_init(_config);
   if (err != ESP_OK) {
     ESP_LOGE(TAG, "driver init failed: %s", esp_err_to_name(err));
@@ -1330,39 +1368,61 @@ bool DisplayService::init(const DisplayValues &initial, bool defer_refresh) {
                    U8G2_MIRROR);
   u8g2_SetFontMode(&_u8g2, 1); // Transparent font mode
 
+  // Retained panel: if the frame the caller believes is on the panel renders
+  // to the hash recorded when it was painted, the panel content is known and
+  // the first refresh can be a Partial against it.
+  bool retained = false;
+  if (painted != nullptr && s_rtc_panel_record.valid) {
+    _render_frame(*painted);
+    retained = render_hash(_render_buf) == s_rtc_panel_record.frame_hash;
+    if (retained) {
+      _partial_count = s_rtc_panel_record.partial_count;
+      _fast_count = s_rtc_panel_record.fast_count;
+    }
+  }
+  go_display_refresh::RefreshDecision decision = go_display_refresh::select_boot_refresh(
+      retained, _partial_count, _fast_count, _cleanup_policy());
+
+  if (decision.mode == RefreshMode::Partial) {
+    // _render_buf still holds the painted frame: restore it as the basemap.
+    err = driver_bus_acquire();
+    if (err == ESP_OK) {
+      err = driver_hw_init_full();
+      if (err == ESP_OK) {
+        err = driver_write_previous_plane(_render_buf);
+      }
+      driver_bus_release();
+    }
+    if (err != ESP_OK) {
+      ESP_LOGW(TAG, "basemap restore failed (%s); using Full", esp_err_to_name(err));
+      decision = {RefreshMode::Full, false};
+    }
+  }
+  ESP_LOGI(TAG, "init refresh: %s (painted=%d retained=%d partials=%u fasts=%u)",
+           refresh_mode_name(decision.mode), painted != nullptr, retained,
+           static_cast<unsigned>(_partial_count), static_cast<unsigned>(_fast_count));
+
   _prev_values = initial;
   _render_frame(initial);
+  _latch_panel(render_hash(_render_buf));
 
   if (!defer_refresh) {
-    // Synchronous initial full refresh (worker not yet started).
-    // Default behavior: backward compatible with run_full_boot() and run_fast_path().
-    err = driver_bus_acquire();
-    if (err != ESP_OK) {
-      ESP_LOGE(TAG, "bus acquire failed for init: %s", esp_err_to_name(err));
+    // Synchronous initial refresh (worker not yet started). Used by
+    // run_fast_path().
+    if (!_run_sync(decision.mode, decision.full_canvas, "initial refresh")) {
       return false;
     }
-    err = driver_hw_init_full();
-    if (err == ESP_OK) {
-      err = driver_set_basemap(_render_buf);
-    }
-    driver_bus_release();
-
-    if (err != ESP_OK) {
-      ESP_LOGE(TAG, "initial refresh failed: %s", esp_err_to_name(err));
-      return false;
-    }
-    _diff_count = 0;
   } else {
     // Deferred refresh: render is already in _render_buf. Reserve it for the
-    // worker, then signal the initial full refresh. Returns in ~10 ms.
-    // The worker acquires the SPI bus for ~3 s; any other SPI device (NAND)
-    // that tries to transmit will block until the worker releases the bus.
-    _pending_mode = RefreshMode::Full;
+    // worker, then signal the initial refresh. Returns in ~10 ms (plus the
+    // ~40 ms basemap restore for a retained Partial). The worker holds the SPI
+    // bus for the refresh; any other SPI device (NAND) that tries to transmit
+    // blocks until the worker releases the bus. A snapshot-based header that
+    // differs from the live runtime state is repainted by the first update()
+    // with a full-canvas Partial (no flash).
+    _pending_mode = decision.mode;
+    _pending_full_canvas = decision.full_canvas;
     _worker_busy.store(true); // cleared by worker when refresh completes
-    // The _prev_values header now reflects the snapshot-based initial frame,
-    // which may differ from the live runtime state the orchestrator produces.
-    // Skip the header-change penalty on the first update()
-    _defer_header_check = true;
   }
 
   // Start async worker task.
@@ -1379,7 +1439,7 @@ bool DisplayService::init(const DisplayValues &initial, bool defer_refresh) {
   }
 
   if (defer_refresh) {
-    // Kick the worker to process the initial full refresh immediately.
+    // Kick the worker to process the initial refresh immediately.
     RTOS::task_notify_give(_task_handle);
   }
 
@@ -1394,66 +1454,44 @@ bool DisplayService::update(const DisplayValues &values, bool wait) {
     return false;
   }
 
-  const bool same_list_screen =
-      is_list_screen(_prev_values.screen) && _prev_values.screen == values.screen;
-  const bool header_changed = _is_header_changed(values, _prev_values) && !_defer_header_check;
-  _defer_header_check = false;
-  const bool both_navigable = is_navigable(_prev_values.screen) && is_navigable(values.screen);
-  const bool can_partial = (both_navigable && !header_changed) || same_list_screen;
-
-  // Crossing the full-canvas session boundary forces a full refresh so no
-  // ghosting from the prior layout remains. All in-session transitions use
-  // partial refresh over y=0..249 so disjoint layouts clear cleanly without
-  // the Full waveform's ~3 s flash.
-  const bool prev_in_session = is_session_screen(_prev_values.screen);
-  const bool next_in_session = is_session_screen(values.screen);
-  const bool crossing_session_boundary = prev_in_session != next_in_session;
-
   _render_frame(values);
+  const uint32_t hash = render_hash(_render_buf);
 
   const bool entering_system_screen =
       is_shutdown_screen(values.screen) || values.screen == Screen::PairingPasskey;
-  const bool menu_navigation =
-      !entering_system_screen &&
-      (is_menu_navigation_screen(_prev_values.screen) || is_menu_navigation_screen(values.screen));
 
-  if (values.screen == Screen::TrackingStatus) {
-    // Status never refreshes the top bar, even on entry or beyond the partial budget.
-    // Its non-session classification keeps the worker's transfer body-only.
-    _pending_mode = RefreshMode::Partial;
-    _menu_exited = true;
-  } else if (crossing_session_boundary) {
-    // Full refresh on the session boundary.  Reset the partial-op counter
-    // so the next session's partials start with a fresh budget.
-    _pending_mode = RefreshMode::Full;
-    _diff_count = 0;
-    _menu_exited = false;
-  } else if (prev_in_session && next_in_session) {
-    // Intra-session transitions (Info text update, Provisioning status
-    // change, Provisioning <-> ProvisioningConfirm, No <-> Yes) are always
-    // full-canvas partial refreshes.  The partial-op counter is NOT
-    // consulted inside the session.
-    _pending_mode = RefreshMode::Partial;
-    _menu_exited = false;
-  } else if (menu_navigation) {
-    _pending_mode = RefreshMode::Partial;
-    _menu_exited = true;
-  } else if (_diff_count >= _config.max_partial_ops) {
-    _pending_mode = RefreshMode::Full;
-  } else if (_menu_exited) {
-    _pending_mode = RefreshMode::Fast;
-  } else if (can_partial) {
-    _pending_mode = RefreshMode::Partial;
-  } else {
-    _pending_mode = RefreshMode::Fast;
-  }
+  // Tracking Status is a list (menu-navigation) screen: its 5 s repaints stay
+  // flash-free Partials, the cleanup cap is deferred while it is open, and a
+  // changed status bar is repainted with a full-canvas Partial.
+  // Crossing the full-canvas session boundary forces a Full refresh so no
+  // ghosting from the prior layout remains; in-session transitions use a
+  // full-canvas Partial. See go_display_refresh.h for the complete policy.
+  go_display_refresh::RefreshInputs in{};
+  in.prev_in_session = is_session_screen(_prev_values.screen);
+  in.next_in_session = is_session_screen(values.screen);
+  in.menu_navigation = !entering_system_screen && (is_menu_navigation_screen(_prev_values.screen) ||
+                                                   is_menu_navigation_screen(values.screen));
+  in.both_navigable = is_navigable(_prev_values.screen) && is_navigable(values.screen);
+  in.header_changed = !_panel_known || _is_header_changed();
+  in.cleanup_requested = _cleanup_requested;
+  in.partial_count = _partial_count;
+  in.fast_count = _fast_count;
 
-  // Clear flag after any full-screen refresh (Full or Fast rewrites everything).
-  if (_pending_mode != RefreshMode::Partial) {
-    _menu_exited = false;
-  }
-
+  const go_display_refresh::RefreshDecision decision =
+      go_display_refresh::select_refresh(in, _cleanup_policy());
+  _cleanup_requested = false;
   _prev_values = values;
+
+  if (decision.mode == RefreshMode::Partial && _panel_known && hash == _panel_hash) {
+    // Identical frame: a Partial would change no pixels. Skipping it keeps it
+    // from counting toward the cleanup cap.
+    _release_framebuffer();
+    return true;
+  }
+
+  _pending_mode = decision.mode;
+  _pending_full_canvas = decision.full_canvas;
+  _latch_panel(hash);
 
   RTOS::task_notify_give(_task_handle);
   return true;
@@ -1462,23 +1500,8 @@ bool DisplayService::update(const DisplayValues &values, bool wait) {
 void DisplayService::update_sync(const DisplayValues &values) {
   (void)_claim_framebuffer(true);
   _render_frame(values);
-
-  esp_err_t err = driver_bus_acquire();
-  if (err != ESP_OK) {
-    ESP_LOGE(TAG, "bus acquire failed for sync update: %s", esp_err_to_name(err));
-    _release_framebuffer();
-    return;
-  }
-  err = driver_hw_init_full();
-  if (err == ESP_OK) {
-    err = driver_set_basemap(_render_buf);
-  }
-  driver_bus_release();
-
-  if (err != ESP_OK) {
-    ESP_LOGE(TAG, "sync update failed: %s", esp_err_to_name(err));
-  }
-  _diff_count = 0;
+  _latch_panel(render_hash(_render_buf));
+  (void)_run_sync(RefreshMode::Full, false, "sync update");
   _prev_values = values;
   _release_framebuffer();
 }
@@ -1492,23 +1515,8 @@ void DisplayService::flush() {
 void DisplayService::clear() {
   (void)_claim_framebuffer(true);
   memset(_render_buf, 0xFF, sizeof(_render_buf));
-
-  esp_err_t err = driver_bus_acquire();
-  if (err != ESP_OK) {
-    ESP_LOGE(TAG, "bus acquire failed for clear: %s", esp_err_to_name(err));
-    _release_framebuffer();
-    return;
-  }
-  err = driver_hw_init_full();
-  if (err == ESP_OK) {
-    err = driver_set_basemap(_render_buf);
-  }
-  driver_bus_release();
-
-  if (err != ESP_OK) {
-    ESP_LOGE(TAG, "clear failed: %s", esp_err_to_name(err));
-  }
-  _diff_count = 0;
+  _latch_panel(render_hash(_render_buf));
+  (void)_run_sync(RefreshMode::Full, false, "clear");
   _release_framebuffer();
 }
 
@@ -1552,6 +1560,80 @@ bool DisplayService::_claim_framebuffer(bool wait) {
 }
 
 void DisplayService::_release_framebuffer() { _worker_busy.store(false); }
+
+go_display_refresh::CleanupPolicy DisplayService::_cleanup_policy() const {
+  return {_config.max_partial_ops, _config.lock_cleanup_min_ops, _config.max_fast_cleanups};
+}
+
+esp_err_t DisplayService::_paint(RefreshMode mode, bool full_canvas) {
+  esp_err_t err = ESP_OK;
+  switch (mode) {
+  case RefreshMode::Full:
+    err = driver_hw_init_full();
+    if (err == ESP_OK)
+      err = driver_set_basemap(_render_buf);
+    _partial_count = 0;
+    _fast_count = 0;
+    break;
+
+  case RefreshMode::Fast:
+    err = driver_hw_init_fast();
+    if (err == ESP_OK)
+      err = driver_fast_write(_render_buf);
+    if (err == ESP_OK)
+      err = driver_fast_commit();
+    _partial_count = 0;
+    if (_fast_count < UINT8_MAX) {
+      _fast_count++;
+    }
+    break;
+
+  case RefreshMode::Partial:
+    err = driver_part_begin();
+    if (err == ESP_OK) {
+      // Full canvas when the session screen owns y=0..17 or the status bar
+      // changed; otherwise body-only leaves the unchanged header untouched.
+      const auto region = go_display_geometry::partial_region(full_canvas);
+      err = driver_part_write_region(0, region.y, _render_buf + region.byte_offset, region.height,
+                                     SCREEN_W);
+    }
+    if (err == ESP_OK)
+      err = driver_part_commit();
+    if (_partial_count < UINT8_MAX) {
+      _partial_count++;
+    }
+    break;
+  }
+
+  if (err == ESP_OK) {
+    s_rtc_panel_record = {_panel_hash, _partial_count, _fast_count, true};
+  } else {
+    // Panel content is unknown: force full-canvas refreshes and a Full on wake.
+    s_rtc_panel_record.valid = false;
+    _panel_known = false;
+  }
+  if (mode != RefreshMode::Partial) {
+    // Flashing refreshes are rare; log them so flashes can be matched to a cause.
+    ESP_LOGI(TAG, "%s refresh (fasts since Full=%u)", refresh_mode_name(mode),
+             static_cast<unsigned>(_fast_count));
+  }
+  return err;
+}
+
+bool DisplayService::_run_sync(RefreshMode mode, bool full_canvas, const char *what) {
+  esp_err_t err = driver_bus_acquire();
+  if (err != ESP_OK) {
+    ESP_LOGE(TAG, "bus acquire failed for %s: %s", what, esp_err_to_name(err));
+    return false;
+  }
+  err = _paint(mode, full_canvas);
+  driver_bus_release();
+  if (err != ESP_OK) {
+    ESP_LOGE(TAG, "%s failed: %s", what, esp_err_to_name(err));
+    return false;
+  }
+  return true;
+}
 
 // ===========================================================================
 // DisplayService — rendering pipeline
@@ -1647,13 +1729,16 @@ void DisplayService::_render_frame(const DisplayValues &v) {
   _draw_snackbar(v);
 }
 
-bool DisplayService::_is_header_changed(const DisplayValues &a, const DisplayValues &b) const {
-  return a.battery_pct != b.battery_pct || a.is_battery_charging != b.is_battery_charging ||
-         a.is_plugged_in != b.is_plugged_in || a.locked != b.locked ||
-         a.ble_enabled != b.ble_enabled || a.ble_connected != b.ble_connected ||
-         a.wifi_enabled != b.wifi_enabled || a.wifi_connected != b.wifi_connected ||
-         a.gps_enabled != b.gps_enabled || a.gps_fix != b.gps_fix ||
-         a.tracking_state != b.tracking_state;
+// Compares rendered pixels, not DisplayValues fields: a battery percentage
+// inside the same glyph bucket, or a hidden icon's state, changes nothing.
+bool DisplayService::_is_header_changed() const {
+  return memcmp(_render_buf, _panel_header, sizeof(_panel_header)) != 0;
+}
+
+void DisplayService::_latch_panel(uint32_t hash) {
+  memcpy(_panel_header, _render_buf, sizeof(_panel_header));
+  _panel_hash = hash;
+  _panel_known = true;
 }
 
 // ===========================================================================
@@ -2528,43 +2613,7 @@ void DisplayService::_worker_loop() {
       continue;
     }
 
-    switch (_pending_mode) {
-    case RefreshMode::Full:
-      err = driver_hw_init_full();
-      if (err == ESP_OK)
-        err = driver_set_basemap(_render_buf);
-      _diff_count = 0;
-      break;
-
-    case RefreshMode::Fast:
-      err = driver_hw_init_fast();
-      if (err == ESP_OK)
-        err = driver_fast_write(_render_buf);
-      if (err == ESP_OK)
-        err = driver_fast_commit();
-      if (_diff_count < UINT8_MAX) {
-        _diff_count++;
-      }
-      break;
-
-    case RefreshMode::Partial:
-      err = driver_part_begin();
-      if (err == ESP_OK) {
-        // Full-canvas session screens own the title region (y=0..17), so a
-        // body-only partial would leave prior pixels there. Everything else
-        // stays body-only.
-        const auto region =
-            go_display_geometry::partial_region(is_session_screen(_prev_values.screen));
-        err = driver_part_write_region(0, region.y, _render_buf + region.byte_offset, region.height,
-                                       SCREEN_W);
-      }
-      if (err == ESP_OK)
-        err = driver_part_commit();
-      if (_diff_count < UINT8_MAX) {
-        _diff_count++;
-      }
-      break;
-    }
+    err = _paint(_pending_mode, _pending_full_canvas);
 
     if (err != ESP_OK) {
       ESP_LOGE(TAG, "worker: refresh failed: %s", esp_err_to_name(err));

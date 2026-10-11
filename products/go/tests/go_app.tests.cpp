@@ -1105,6 +1105,68 @@ TEST_CASE("build_wake_values: snapshot valid -> values seeded") {
   CHECK(v.snackbar_text != nullptr);
 }
 
+TEST_CASE("build_wake_values: restores the plug icon state from the snapshot") {
+  RtcDisplaySnapshot snap{};
+  snap.is_plugged_in = true;
+  snap.locked = true;
+
+  DisplayValues v = build_wake_values(snap, true);
+
+  CHECK(v.is_plugged_in);
+  CHECK(v.locked == false); // wake always shows the unlocked frame
+}
+
+TEST_CASE("RTC snapshot round-trips a fast-path frame exactly") {
+  // The retained-panel wake re-renders the previous fast-path frame from the
+  // snapshot; any field lost here would make the hash check fail every wake.
+  MeasuresAGo m{};
+  m.co2.co2 = 640;
+  m.pm_a.pm_25 = 12.5f;
+  m.temp_hum_a.temperature = 22.0f;
+  m.temp_hum_a.humidity = 45.0f;
+  m.tvoc_nox.tvoc_index = 110;
+  m.tvoc_nox.nox_index = 2;
+  m.pressure.pressure = 1009.0f;
+  m.pressure.altitude = 40.0f;
+  PowerSnapshot bms{};
+  bms.battery_percentage = 64.0f;
+  GoSettings settings{};
+  settings.use_fahrenheit = true;
+  settings.pm_use_usaqi = true;
+
+  const DisplayValues painted = build_fast_path_display(m, GpsData{}, bms, settings,
+                                                        TrackingState::Recording);
+  const DisplayValues rebuilt = display_values_from_snapshot(snapshot_from_display_values(painted));
+
+  CHECK(rebuilt.co2_ppm == painted.co2_ppm);
+  CHECK(rebuilt.pm25_ugm3 == painted.pm25_ugm3);
+  CHECK(rebuilt.temperature_c == painted.temperature_c);
+  CHECK(rebuilt.humidity_pct == painted.humidity_pct);
+  CHECK(rebuilt.tvoc_index == painted.tvoc_index);
+  CHECK(rebuilt.nox_index == painted.nox_index);
+  CHECK(rebuilt.pressure_hpa == painted.pressure_hpa);
+  CHECK(rebuilt.altitude_m == painted.altitude_m);
+  CHECK(rebuilt.battery_pct == painted.battery_pct);
+  CHECK(rebuilt.is_battery_charging == painted.is_battery_charging);
+  CHECK(rebuilt.is_plugged_in == painted.is_plugged_in);
+  CHECK(rebuilt.locked == painted.locked);
+  CHECK(rebuilt.ble_enabled == painted.ble_enabled);
+  CHECK(rebuilt.ble_connected == painted.ble_connected);
+  CHECK(rebuilt.wifi_enabled == painted.wifi_enabled);
+  CHECK(rebuilt.gps_enabled == painted.gps_enabled);
+  CHECK(rebuilt.gps_fix == painted.gps_fix);
+  CHECK(rebuilt.tracking_state == painted.tracking_state);
+  CHECK(rebuilt.display_off == painted.display_off);
+  CHECK(rebuilt.use_fahrenheit == painted.use_fahrenheit);
+  CHECK(rebuilt.use_feet == painted.use_feet);
+  CHECK(rebuilt.pm_use_usaqi == painted.pm_use_usaqi);
+  CHECK(rebuilt.screen == painted.screen);
+  CHECK(rebuilt.active_metric == painted.active_metric);
+  CHECK(rebuilt.snackbar_text == painted.snackbar_text);
+  CHECK(rebuilt.chart_samples == painted.chart_samples);
+  CHECK(rebuilt.row_count == painted.row_count);
+}
+
 TEST_CASE("build_wake_values: snapshot invalid -> defaults, unlocked") {
   RtcDisplaySnapshot snap{};
 

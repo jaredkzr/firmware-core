@@ -1583,6 +1583,9 @@ void Orchestrator::lock() {
   _svc.ui_manager.show_snackbar("Locked");
   _lock_state = LockState::Locked;
   _svc.ui_manager.reset_to_home();
+  // Locking is when the user looks away: run any pending ghosting cleanup
+  // (a single-flash refresh) now rather than mid-use.
+  _svc.display_service.request_cleanup();
   update_display(/*wait=*/true);
 }
 
