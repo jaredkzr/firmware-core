@@ -24,6 +24,7 @@
 #include "common.h"
 #include "go_ble_protocol.h"
 #include "go_board.h"
+#include "go_bthome.h"
 #include "go_chart_history.h"
 #include "go_gas_index_rtc.h"
 #include "go_local_api.h"
@@ -1134,6 +1135,11 @@ void Orchestrator::on_sensor_data(const MeasuresAGo &data, MeasurementOrigin ori
   // BLE transports raw measurements; clients decide whether and how to apply
   // the correction settings from Config.
   _svc.ble_service.notify_measures(_raw_measures, _latest_gps, time(nullptr));
+  // The BTHome broadcast carries what the display shows: listeners cannot
+  // apply the correction settings themselves.
+  save_rtc_bthome(
+      bthome_readings_from(_corrected_measures, _corrected_measures.power.battery_percentage));
+  _svc.ble_service.refresh_broadcast();
 
   try_start_peripheral_sensor_test();
   sleep_pm_if_idle();

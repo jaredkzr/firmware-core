@@ -30,6 +30,7 @@ enum esp_reset_reason_t { ESP_RST_UNKNOWN = 0 };
 inline esp_reset_reason_t esp_reset_reason() { return ESP_RST_UNKNOWN; }
 #endif
 #include "go_ble.h"
+#include "go_bthome.h"
 #include "go_chart_history.h"
 #include "accel/accel_service.h"
 #include "go_buzzer.h"
@@ -645,6 +646,14 @@ GoApp::FastPathResult GoApp::execute_fast_path(const RtcAppState &state,
     PowerService &pwr = _board.power();
     if (!power_polled) {
       power_snapshot = pwr.poll_bms();
+    }
+
+    // Recorded even when BLE is down: the connect windows before the next
+    // measurement re-broadcast it.
+    save_rtc_bthome(bthome_readings_from(apply_measurement_corrections(ago, settings.corrections),
+                                         power_snapshot.battery_percentage));
+    if (ble != nullptr) {
+      ble->ble->refresh_broadcast();
     }
 
     DisplayService &disp = _board.display();

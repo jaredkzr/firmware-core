@@ -57,6 +57,25 @@ uint8_t to_nimble_io_cap(AgBleIoCapability io_cap) {
   return BLE_HS_IO_NO_INPUT_OUTPUT;
 }
 
+#if MYNEWT_VAL(BLE_EXT_ADV)
+// Advertising sets used in extended-advertising builds. Both send legacy
+// PDUs so every BLE 4.x scanner sees them.
+constexpr uint8_t CONNECTABLE_ADV_INSTANCE = 0;
+constexpr uint8_t BROADCAST_ADV_INSTANCE = 1;
+static_assert(MYNEWT_VAL(BLE_MULTI_ADV_INSTANCES) >= BROADCAST_ADV_INSTANCE,
+              "set CONFIG_BT_NIMBLE_MAX_EXT_ADV_INSTANCES >= 1 for the broadcast set");
+// Payload builders fail past this size, which is what makes a full
+// advertisement overflow to the scan response as in legacy builds.
+static_assert(MYNEWT_VAL(BLE_EXT_ADV_MAX_SIZE) <= BLE_HS_ADV_MAX_SZ,
+              "set CONFIG_BT_NIMBLE_EXT_ADV_MAX_SIZE=31: both sets send legacy PDUs");
+
+// Stops @p inst_id if it is advertising. ble_gap_ext_adv_stop() rejects a set
+// that was never configured, so an idle set is left alone.
+bool stop_adv_instance(NimBLEExtAdvertising &adv, uint8_t inst_id) {
+  return !adv.isActive(inst_id) || adv.stop(inst_id);
+}
+#endif
+
 } // namespace
 
 // NimbleWriteBridge
@@ -171,6 +190,27 @@ bool NimbleBleServer::init(const char *device_name) {
     return false;
   }
 
+#if MYNEWT_VAL(BLE_EXT_ADV)
+  _adv_data.reset(new (std::nothrow) NimBLEExtAdvertisement());
+  _scan_response.reset(new (std::nothrow) NimBLEExtAdvertisement());
+  if (_adv_data == nullptr || _scan_response == nullptr) {
+    _adv_data.reset();
+    _scan_response.reset();
+    _server = nullptr;
+    NimBLEDevice::deinit(true);
+    return false;
+  }
+  // Same PDU type, flags and interval NimBLEAdvertising uses for undirected
+  // connectable advertising in legacy builds.
+  _adv_data->setLegacyAdvertising(true);
+  _adv_data->setConnectable(true);
+  _adv_data->setScannable(true);
+  _adv_data->setFlags(BLE_HS_ADV_F_DISC_GEN);
+  _adv_data->setMinInterval(BLE_GAP_ADV_FAST_INTERVAL1_MIN);
+  _adv_data->setMaxInterval(BLE_GAP_ADV_FAST_INTERVAL1_MAX);
+  _adv_configured = false;
+#endif
+
   // Pass false so NimBLE does not attempt to delete this object's callbacks
   // pointer (this NimbleBleServer IS the callbacks object).
   _server->setCallbacks(this, false);
@@ -194,6 +234,21 @@ bool NimbleBleServer::delete_all_bonds() {
     return true;
   }
 
+#if MYNEWT_VAL(BLE_EXT_ADV)
+  // Only the connectable set is paused; the broadcast set keeps running.
+  NimBLEExtAdvertising *advertising = NimBLEDevice::getAdvertising();
+  const bool was_advertising =
+      advertising != nullptr && advertising->isActive(CONNECTABLE_ADV_INSTANCE);
+  if (was_advertising && !advertising->stop(CONNECTABLE_ADV_INSTANCE)) {
+    return false;
+  }
+
+  const bool bonds_deleted = NimBLEDevice::deleteAllBonds();
+  if (was_advertising) {
+    (void)advertising->start(CONNECTABLE_ADV_INSTANCE);
+  }
+  return bonds_deleted;
+#else
   NimBLEAdvertising *advertising = NimBLEDevice::getAdvertising();
   const bool was_advertising = advertising != nullptr && advertising->isAdvertising();
   if (was_advertising && !NimBLEDevice::stopAdvertising()) {
@@ -205,6 +260,7 @@ bool NimbleBleServer::delete_all_bonds() {
     (void)NimBLEDevice::startAdvertising();
   }
   return bonds_deleted;
+#endif
 }
 
 void NimbleBleServer::deinit() {
@@ -241,6 +297,11 @@ void NimbleBleServer::deinit() {
 
   _conn_handle.store(BLE_HS_CONN_HANDLE_NONE);
   _services.clear();
+#if MYNEWT_VAL(BLE_EXT_ADV)
+  _adv_data.reset();
+  _scan_response.reset();
+  _adv_configured = false;
+#endif
   _server = nullptr;
   NimBLEDevice::deinit(true);
 }
@@ -279,6 +340,12 @@ bool NimbleBleServer::set_advertising_name(const char *name) {
     return false;
   }
 
+#if MYNEWT_VAL(BLE_EXT_ADV)
+  // Keep UUID in the advertisement and move the full name to scan response.
+  _scan_response->removeData(BLE_HS_ADV_TYPE_COMP_NAME);
+  _adv_configured = false;
+  return _scan_response->setName(name);
+#else
   NimBLEAdvertising *advertising = NimBLEDevice::getAdvertising();
   if (advertising == nullptr) {
     return false;
@@ -287,6 +354,7 @@ bool NimbleBleServer::set_advertising_name(const char *name) {
   // Keep UUID in the advertisement and move the full name to scan response.
   advertising->enableScanResponse(true);
   return advertising->setName(name);
+#endif
 }
 
 bool NimbleBleServer::add_advertised_service_uuid(const char *uuid) {
@@ -294,12 +362,18 @@ bool NimbleBleServer::add_advertised_service_uuid(const char *uuid) {
     return false;
   }
 
+#if MYNEWT_VAL(BLE_EXT_ADV)
+  // Overflows to the scan response like NimBLEAdvertising::addServiceUUID().
+  _adv_configured = false;
+  return _adv_data->addServiceUUID(uuid) || _scan_response->addServiceUUID(uuid);
+#else
   NimBLEAdvertising *advertising = NimBLEDevice::getAdvertising();
   if (advertising == nullptr) {
     return false;
   }
 
   return advertising->addServiceUUID(uuid);
+#endif
 }
 
 bool NimbleBleServer::set_manufacturer_data(const uint8_t *data, size_t len) {
@@ -307,12 +381,21 @@ bool NimbleBleServer::set_manufacturer_data(const uint8_t *data, size_t len) {
     return false;
   }
 
+#if MYNEWT_VAL(BLE_EXT_ADV)
+  // Overflows to the scan response like NimBLEAdvertising::setManufacturerData().
+  _adv_data->removeData(BLE_HS_ADV_TYPE_MFG_DATA);
+  _scan_response->removeData(BLE_HS_ADV_TYPE_MFG_DATA);
+  _adv_configured = false;
+  return _adv_data->setManufacturerData(data, len) ||
+         _scan_response->setManufacturerData(data, len);
+#else
   NimBLEAdvertising *advertising = NimBLEDevice::getAdvertising();
   if (advertising == nullptr) {
     return false;
   }
 
   return advertising->setManufacturerData(data, len);
+#endif
 }
 
 bool NimbleBleServer::start_advertising() {
@@ -331,7 +414,27 @@ bool NimbleBleServer::start_advertising() {
     NimBLEDevice::setDeviceName(_device_name);
   }
 
+#if MYNEWT_VAL(BLE_EXT_ADV)
+  NimBLEExtAdvertising *advertising = NimBLEDevice::getAdvertising();
+  if (advertising == nullptr) {
+    return false;
+  }
+  if (!_adv_configured) {
+    // A set's parameters and data can only be configured while it is idle.
+    if (!stop_adv_instance(*advertising, CONNECTABLE_ADV_INSTANCE) ||
+        !advertising->setInstanceData(CONNECTABLE_ADV_INSTANCE, *_adv_data)) {
+      return false;
+    }
+    if (_scan_response->getDataSize() > 0 &&
+        !advertising->setScanResponseData(CONNECTABLE_ADV_INSTANCE, *_scan_response)) {
+      return false;
+    }
+    _adv_configured = true;
+  }
+  return advertising->start(CONNECTABLE_ADV_INSTANCE);
+#else
   return NimBLEDevice::startAdvertising();
+#endif
 }
 
 bool NimbleBleServer::stop_advertising() {
@@ -339,8 +442,49 @@ bool NimbleBleServer::stop_advertising() {
     return false;
   }
 
+#if MYNEWT_VAL(BLE_EXT_ADV)
+  NimBLEExtAdvertising *advertising = NimBLEDevice::getAdvertising();
+  return advertising != nullptr && stop_adv_instance(*advertising, CONNECTABLE_ADV_INSTANCE);
+#else
   return NimBLEDevice::stopAdvertising();
+#endif
 }
+
+#if MYNEWT_VAL(BLE_EXT_ADV)
+bool NimbleBleServer::set_broadcast_data(const uint8_t *data, size_t len) {
+  if (_server == nullptr || data == nullptr || len == 0 || len > BLE_HS_ADV_MAX_SZ) {
+    return false;
+  }
+
+  NimBLEExtAdvertising *advertising = NimBLEDevice::getAdvertising();
+  if (advertising == nullptr || !stop_adv_instance(*advertising, BROADCAST_ADV_INSTANCE)) {
+    return false;
+  }
+
+  // Non-connectable, non-scannable legacy PDU (ADV_NONCONN_IND) at the
+  // interval NimBLE uses by default for non-connectable advertising.
+  NimBLEExtAdvertisement broadcast;
+  broadcast.setLegacyAdvertising(true);
+  broadcast.setConnectable(false);
+  broadcast.setScannable(false);
+  broadcast.setMinInterval(BLE_GAP_ADV_FAST_INTERVAL2_MIN);
+  broadcast.setMaxInterval(BLE_GAP_ADV_FAST_INTERVAL2_MAX);
+  if (!broadcast.setData(data, len) ||
+      !advertising->setInstanceData(BROADCAST_ADV_INSTANCE, broadcast)) {
+    return false;
+  }
+  return advertising->start(BROADCAST_ADV_INSTANCE);
+}
+
+bool NimbleBleServer::stop_broadcast() {
+  if (_server == nullptr) {
+    return false;
+  }
+
+  NimBLEExtAdvertising *advertising = NimBLEDevice::getAdvertising();
+  return advertising != nullptr && stop_adv_instance(*advertising, BROADCAST_ADV_INSTANCE);
+}
+#endif
 
 bool NimbleBleServer::request_conn_params(uint16_t min_interval_ms, uint16_t max_interval_ms,
                                           uint16_t latency, uint16_t supervision_timeout_ms) {

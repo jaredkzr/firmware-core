@@ -98,6 +98,7 @@ bool portable_ble_start_result = false;
 int portable_ble_start_count = 0;
 bool ble_connected = false;
 int ble_deinit_count = 0;
+int ble_refresh_broadcast_count = 0;
 bool should_hold_pm_result = false;
 bool shutdown_called = false;
 bool power_on_reset = false;
@@ -208,6 +209,7 @@ void reset() {
   portable_ble_start_count = 0;
   ble_connected = false;
   ble_deinit_count = 0;
+  ble_refresh_broadcast_count = 0;
   should_hold_pm_result = false;
   shutdown_called = false;
   power_on_reset = false;
@@ -674,6 +676,7 @@ bool BleService::is_connected() const { return test_spy::ble_connected; }
 bool BleService::is_authenticated() const { return false; }
 void BleService::notify_measures(const MeasuresAGo & /*m*/, const GpsData & /*gps*/,
                                  time_t /*ts*/) {}
+void BleService::refresh_broadcast() { ++test_spy::ble_refresh_broadcast_count; }
 void BleService::update_status(const PowerSnapshot & /*power*/, const GpsData & /*gps*/,
                                uint32_t /*session_id*/, TrackingState /*state*/) {}
 void BleService::notify_charging_status(const PowerSnapshot & /*power*/, const GpsData & /*gps*/,

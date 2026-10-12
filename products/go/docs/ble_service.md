@@ -13,6 +13,7 @@ in the NimBLE task and post lightweight events to the orchestrator queue.
 | `products/go/main/go_ble.h` | `BleService` class declaration |
 | `products/go/main/go_ble.cpp` | GATT setup, CBOR encoding, NimBLE callbacks, binary history streaming |
 | `products/go/main/go_ble_protocol.h` | BLE CBOR protocol string constants (`BLE_KEY_*`, `BLE_VAL_*`) shared across BLE and orchestrator |
+| `products/go/main/go_bthome.h` / `.cpp` | BTHome v2 broadcast encoder and its RTC record (latest readings + packet id) |
 
 ## Dependencies
 
@@ -90,7 +91,51 @@ local name goes in the scan response (the UUID plus AD flags consume 21 of the
 The new 19-character name fits comfortably in the 29-byte scan response budget.
 
 Advertising is single-connection: `on_connect()` calls `stop_advertising()`,
-`on_disconnect()` calls `start_advertising()`.
+`on_disconnect()` calls `start_advertising()`. Both affect only the connectable
+advertisement; the BTHome broadcast below keeps running while a client is
+connected.
+
+### BTHome Broadcast
+
+Next to the connectable advertisement, Portable sends the latest readings as a
+non-connectable [BTHome v2](https://bthome.io) advertisement, so passive
+scanners (Home Assistant, ESPHome Bluetooth proxies, Theengs) can record
+measurements without connecting and without keeping the device awake. The two
+run as separate legacy advertising sets (`CONFIG_BT_NIMBLE_EXT_ADV`, instance 0
+connectable, instance 1 broadcast) because the data-service UUID and name
+leave no room for sensor data in the connectable advertisement. The broadcast
+uses the NimBLE default non-connectable interval (100-150 ms) and is
+unencrypted: anyone in range can read the values.
+
+The payload fills the 31-byte legacy limit exactly:
+
+| Bytes | Content |
+|---|---|
+| `02 01 06` | Flags |
+| `1B 16 D2 FC 40` | Service data, UUID `0xFCD2`, BTHome v2 unencrypted, regular interval |
+| `00 <id>` | Packet id, one per measurement |
+| `01 <u8>` | Battery, % |
+| `02 <s16>` | Temperature, 0.01 degrees C |
+| `0D <u16>` | PM2.5, ug/m3 |
+| `12 <u16>` | CO2, ppm |
+| `2E <u8>` | Humidity, % |
+| `3D <u16>` | Count: TVOC index |
+| `3E <u32>` | Count: NOx index |
+
+Values are the corrected (displayed) readings, since a listener cannot apply
+the correction settings. Invalid fields are omitted and the service-data
+length shrinks to match. BTHome has no gas-index object, so the indices use the
+two count objects; they have different object ids so NOx stays the second
+count when TVOC is missing. Home Assistant shows them as two count sensors,
+TVOC first.
+
+Each new measurement is recorded in RTC memory with `save_rtc_bthome()`
+(orchestrator `on_sensor_data()`, and the fast-path measurement wake), which
+advances the packet id, then sent with `refresh_broadcast()`.
+`start_advertising()` also calls `refresh_broadcast()`, so a Portable Sleep
+connect-window wake re-broadcasts the previous measurement under the same
+packet id, which receivers drop as a repeat. The record is lost on any reset
+other than a deep-sleep wake; until the next measurement nothing is broadcast.
 
 ---
 
@@ -923,6 +968,7 @@ failed `setup_ble()` is non-fatal (advertise without OTA). See
 | Method | Description |
 |---|---|
 | `notify_measures(measures, gps, timestamp)` | Encode via `encode_measures()`, always `set_value()` for READ access, additionally `notify()` when `_connected`. No-op if `_measures_char == nullptr`. |
+| `refresh_broadcast()` | Encode the measurement last recorded with `save_rtc_bthome()` as BTHome v2 and send it as the broadcast advertisement (`AgBleServer::set_broadcast_data()`). No-op when not initialized or nothing is recorded; a failure is logged and leaves the data service alone. Also called by `start_advertising()`. |
 | `update_status(power, gps, session_id, tracking_state)` | Encode via `encode_status()`, `set_value()` only. Sole writer of the Status snapshot. Derives the legacy boolean from the enum. |
 | `notify_tracking_status(power, gps, session_id, tracking_state)` | Refreshes the full 10-key Read snapshot, then pushes `{tracking, session, trk}` via `notify(data, len)` on start success/failure, pause, resume, and stop. Read remains authoritative. |
 | `notify_charging_status(power, gps, session_id, tracking_state)` | Refreshes the full 10-key Read snapshot, then pushes `{charging, bat_pct, bat_v}` on charging transitions. Tracking state remains in the Read snapshot. |

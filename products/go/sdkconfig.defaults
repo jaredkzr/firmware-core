@@ -26,6 +26,16 @@ CONFIG_BT_NIMBLE_NVS_PERSIST=y
 CONFIG_BT_NIMBLE_SM_LEGACY=y
 CONFIG_BT_NIMBLE_SM_SC=y
 
+# BLE multi-advertising: the connectable data-service advertisement and the
+# BTHome v2 sensor broadcast run as two legacy advertising sets (instances 0
+# and 1), so passive scanners read measurements without connecting. Both send
+# legacy PDUs, so the data size is capped at the legacy 31 bytes; periodic
+# advertising is unused.
+CONFIG_BT_NIMBLE_EXT_ADV=y
+CONFIG_BT_NIMBLE_MAX_EXT_ADV_INSTANCES=1
+CONFIG_BT_NIMBLE_EXT_ADV_MAX_SIZE=31
+CONFIG_BT_NIMBLE_ENABLE_PERIODIC_ADV=n
+
 # BLE push OTA: larger ATT MTU for throughput.  At MTU 512 the ATT
 # Write-Command payload is MTU-3 = 509 bytes, so the phone chunks Data writes
 # to <= 509 bytes (the component rejects single Data writes larger than

@@ -15,6 +15,7 @@
 
 #include "ag_log.h"
 #include "go_ble_protocol.h"
+#include "go_bthome.h"
 #include "go_events.h"
 #include "go_storage.h"
 #include "go_type_helpers.hpp"
@@ -643,6 +644,7 @@ bool BleService::start_advertising() {
 
   _initialized = true;
   AG_LOGI(TAG, "initialized, advertising as '%s'", _adv_name);
+  refresh_broadcast();
   return true;
 }
 
@@ -669,6 +671,21 @@ void BleService::deinit() {
   _history_char = nullptr;
 
   AG_LOGI(TAG, "deinitialized");
+}
+
+void BleService::refresh_broadcast() {
+  BthomeReadings readings{};
+  uint8_t packet_id = 0;
+  if (!_initialized || !load_rtc_bthome(readings, packet_id)) {
+    return;
+  }
+  uint8_t adv[BTHOME_ADV_MAX_LEN];
+  const size_t len = encode_bthome_adv(readings, packet_id, adv, sizeof(adv));
+  if (len == 0 || !_server->set_broadcast_data(adv, len)) {
+    AG_LOGW(TAG, "BTHome broadcast not started");
+    return;
+  }
+  AG_LOGD(TAG, "BTHome broadcast packet %u (%u bytes)", packet_id, static_cast<unsigned>(len));
 }
 
 void BleService::set_disconnect_observer(AgBleDisconnectCallback cb) {

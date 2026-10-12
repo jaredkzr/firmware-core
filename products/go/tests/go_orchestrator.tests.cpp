@@ -27,6 +27,7 @@
 #include "go_app.h"
 #include "go_ble_protocol.h"
 #include "go_board.h"
+#include "go_bthome.h"
 #include "go_local_api.h"
 #include "go_orchestrator.h"
 #include "go_type_helpers.hpp"
@@ -152,6 +153,7 @@ extern bool ble_deinit_called;
 extern bool ble_initialized;
 extern bool ble_connected;
 extern bool ble_authenticated;
+extern int ble_refresh_broadcast_count;
 extern bool ble_notify_measures_called;
 extern MeasuresAGo ble_last_measures;
 extern bool ble_update_status_called;
@@ -4214,6 +4216,34 @@ TEST_CASE("on_sensor_data: measures power comes from latest PowerSnapshot",
   CHECK(test_spy::cloud_last_snapshot.power.battery_percentage == 54.0f);
   CHECK(test_spy::cloud_last_snapshot.power.battery_voltage == 3.82f);
   CHECK(test_spy::cloud_last_snapshot.power.charging_voltage == 5.01f);
+}
+
+TEST_CASE("on_sensor_data: records corrected readings for the BTHome broadcast",
+          "[Orchestrator][events]") {
+  TestFixture f;
+  auto orch = f.make_orchestrator();
+  clear_rtc_bthome();
+
+  PowerSnapshot power{};
+  power.battery_percentage = 54.0f;
+  A::set_latest_power(orch, power);
+
+  MeasuresAGo data{};
+  data.co2.co2 = 420;
+  data.temp_hum_a.temperature = 22.0f;
+  data.temp_hum_a.humidity = 40.0f;
+  A::on_sensor_data(orch, data);
+  A::on_sensor_data(orch, data);
+
+  BthomeReadings readings{};
+  uint8_t packet_id = 0;
+  REQUIRE(load_rtc_bthome(readings, packet_id));
+  CHECK(packet_id == 1); // one packet id per measurement
+  CHECK(readings.co2_ppm == 420);
+  CHECK(readings.temperature_c == A::corrected_measures(orch).temp_hum_a.temperature);
+  CHECK(readings.battery_pct == 54.0f);
+  CHECK(test_spy::ble_refresh_broadcast_count == 2);
+  clear_rtc_bthome();
 }
 
 TEST_CASE("on_sensor_data: appends route point when tracking", "[Orchestrator][events]") {

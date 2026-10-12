@@ -135,6 +135,7 @@ bool ble_initialized = false;
 bool ble_connected = false;
 bool ble_authenticated = false;
 bool ble_notify_measures_called = false;
+int ble_refresh_broadcast_count = 0;
 MeasuresAGo ble_last_measures{};
 TrackingState ble_tracking_state = TrackingState::Idle;
 bool ble_update_status_called = false;
@@ -345,6 +346,7 @@ void reset() {
   ble_connected = false;
   ble_authenticated = false;
   ble_notify_measures_called = false;
+  ble_refresh_broadcast_count = 0;
   ble_last_measures = MeasuresAGo{};
   ble_tracking_state = TrackingState::Idle;
   ble_update_status_called = false;
@@ -895,6 +897,7 @@ bool BleService::is_connected() const { return test_spy::ble_connected; }
 
 bool BleService::is_authenticated() const { return test_spy::ble_authenticated; }
 
+void BleService::refresh_broadcast() { ++test_spy::ble_refresh_broadcast_count; }
 void BleService::notify_measures(const MeasuresAGo &m, const GpsData & /*gps*/, time_t /*ts*/) {
   test_spy::ble_notify_measures_called = true;
   test_spy::ble_last_measures = m;
