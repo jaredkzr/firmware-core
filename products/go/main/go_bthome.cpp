@@ -11,6 +11,8 @@
 
 #include <cmath>
 
+#include "go_settings.h"
+
 // Host test builds have no RTC attribute; define it away.
 #if !defined(TEST_HOST) && defined(__has_include)
 #if __has_include("esp_attr.h")
@@ -91,6 +93,19 @@ struct RtcBthome {
 
 // Zero-initialized on every reset except a deep-sleep wake: nothing recorded.
 RTC_DATA_ATTR RtcBthome s_rtc_bthome = {};
+
+// --- Scan response ---
+constexpr uint8_t AD_TYPE_MANUFACTURER_DATA = 0xFF;
+
+// Bump when BthomeUnits' layout changes.
+constexpr uint32_t RTC_BTHOME_UNITS_MAGIC = 0x42545501; // "BTU" v1
+
+struct RtcBthomeUnits {
+  uint32_t magic;
+  BthomeUnits units;
+};
+
+RTC_DATA_ATTR RtcBthomeUnits s_rtc_bthome_units = {};
 
 } // namespace
 
@@ -189,6 +204,53 @@ size_t encode_bthome_adv(const BthomeReadings &r, uint8_t packet_id, uint8_t *ou
   return w.len();
 }
 
+BthomeUnits bthome_units_from(const GoSettings &settings) {
+  BthomeUnits units{};
+  units.fahrenheit = settings.use_fahrenheit;
+  units.pm_us_aqi = settings.pm_use_usaqi;
+  units.altitude_feet = settings.use_feet;
+  return units;
+}
+
+size_t encode_bthome_scan_rsp(const BthomeUnits &units, uint8_t *out, size_t out_size) {
+  if (out == nullptr || out_size < BTHOME_SCAN_RSP_LEN) {
+    return 0;
+  }
+  uint8_t flags = 0;
+  if (units.fahrenheit) {
+    flags |= BTHOME_UNITS_FLAG_FAHRENHEIT;
+  }
+  if (units.pm_us_aqi) {
+    flags |= BTHOME_UNITS_FLAG_PM_US_AQI;
+  }
+  if (units.altitude_feet) {
+    flags |= BTHOME_UNITS_FLAG_ALTITUDE_FEET;
+  }
+  Writer w(out);
+  w.u8(BTHOME_SCAN_RSP_LEN - 1); // AD length counts the type byte and after
+  w.u8(AD_TYPE_MANUFACTURER_DATA);
+  w.u16(BTHOME_UNITS_COMPANY_ID);
+  w.u8(BTHOME_UNITS_VERSION);
+  w.u8(flags);
+  return w.len();
+}
+
+bool set_rtc_bthome_units(const BthomeUnits &units) {
+  const bool changed =
+      s_rtc_bthome_units.magic != RTC_BTHOME_UNITS_MAGIC || s_rtc_bthome_units.units != units;
+  s_rtc_bthome_units.units = units;
+  s_rtc_bthome_units.magic = RTC_BTHOME_UNITS_MAGIC;
+  return changed;
+}
+
+bool load_rtc_bthome_units(BthomeUnits &units) {
+  if (s_rtc_bthome_units.magic != RTC_BTHOME_UNITS_MAGIC) {
+    return false;
+  }
+  units = s_rtc_bthome_units.units;
+  return true;
+}
+
 void save_rtc_bthome(const BthomeReadings &readings) {
   // A fresh record starts at packet id 0; later ones count up, wrapping.
   const bool had_record = s_rtc_bthome.magic == RTC_BTHOME_MAGIC;
@@ -206,4 +268,7 @@ bool load_rtc_bthome(BthomeReadings &readings, uint8_t &packet_id) {
   return true;
 }
 
-void clear_rtc_bthome() { s_rtc_bthome.magic = 0; }
+void clear_rtc_bthome() {
+  s_rtc_bthome.magic = 0;
+  s_rtc_bthome_units.magic = 0;
+}

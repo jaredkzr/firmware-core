@@ -165,7 +165,8 @@ Portable also broadcasts the latest readings (battery, temperature, humidity,
 PM2.5, CO2, TVOC and NOx index) as an unencrypted BTHome v2 advertisement.
 Home Assistant and other BTHome receivers can record them without connecting,
 including during Portable Sleep connect windows and while the phone app is
-connected.
+connected. Its scan response tells apps which temperature, PM, and altitude
+units the Go displays, so they can match it.
 
 ## Wi-Fi, Local Server, And Cloud Features
 

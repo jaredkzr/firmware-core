@@ -1139,6 +1139,7 @@ void Orchestrator::on_sensor_data(const MeasuresAGo &data, MeasurementOrigin ori
   // apply the correction settings themselves.
   save_rtc_bthome(
       bthome_readings_from(_corrected_measures, _corrected_measures.power.battery_percentage));
+  set_rtc_bthome_units(bthome_units_from(_settings));
   _svc.ble_service.refresh_broadcast();
 
   try_start_peripheral_sensor_test();
@@ -2246,6 +2247,10 @@ void Orchestrator::apply_settings_runtime_delta(const GoSettings &previous_setti
   }
 
   _svc.ui_manager.sync_settings(_settings);
+  // Apps reading the BTHome broadcast follow the Go's display units.
+  if (set_rtc_bthome_units(bthome_units_from(_settings))) {
+    _svc.ble_service.refresh_broadcast();
+  }
   if (!mode_changing && _svc.ble_service.is_connected()) {
     _svc.ble_service.notify_config(previous_settings, _settings);
   }

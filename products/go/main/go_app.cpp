@@ -652,6 +652,7 @@ GoApp::FastPathResult GoApp::execute_fast_path(const RtcAppState &state,
     // measurement re-broadcast it.
     save_rtc_bthome(bthome_readings_from(apply_measurement_corrections(ago, settings.corrections),
                                          power_snapshot.battery_percentage));
+    set_rtc_bthome_units(bthome_units_from(settings));
     if (ble != nullptr) {
       ble->ble->refresh_broadcast();
     }

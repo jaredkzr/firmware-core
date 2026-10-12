@@ -13,7 +13,7 @@ in the NimBLE task and post lightweight events to the orchestrator queue.
 | `products/go/main/go_ble.h` | `BleService` class declaration |
 | `products/go/main/go_ble.cpp` | GATT setup, CBOR encoding, NimBLE callbacks, binary history streaming |
 | `products/go/main/go_ble_protocol.h` | BLE CBOR protocol string constants (`BLE_KEY_*`, `BLE_VAL_*`) shared across BLE and orchestrator |
-| `products/go/main/go_bthome.h` / `.cpp` | BTHome v2 broadcast encoder and its RTC record (latest readings + packet id) |
+| `products/go/main/go_bthome.h` / `.cpp` | BTHome v2 broadcast encoder, its units scan response, and their RTC records (latest readings + packet id; display units) |
 
 ## Dependencies
 
@@ -136,6 +136,28 @@ advances the packet id, then sent with `refresh_broadcast()`.
 connect-window wake re-broadcasts the previous measurement under the same
 packet id, which receivers drop as a repeat. The record is lost on any reset
 other than a deep-sleep wake; until the next measurement nothing is broadcast.
+
+#### Units Scan Response
+
+The broadcast is scannable (`ADV_SCAN_IND`): active scanners, such as an
+Android app, also get a 6-byte scan response with the display units chosen on
+the device, so they can show readings the way the Go does. The BTHome payload
+has no room left and keeps BTHome's units; passive receivers such as Home
+Assistant never request the scan response and see no change.
+
+| Bytes | Content |
+|---|---|
+| `05 FF` | Manufacturer-specific data, 5 bytes follow |
+| `FF FF` | Company id 0xFFFF (no company id assigned) |
+| `01` | Format version |
+| `<flags>` | Bit 0 temperature in °F, bit 1 PM as US AQI, bit 2 altitude in feet |
+
+The units are kept in RTC memory apart from the measurement
+(`set_rtc_bthome_units()`), so they don't advance the packet id. The
+orchestrator records them with each measurement (as does the fast-path
+measurement wake) and again when a settings change alters them, in which case
+it calls `refresh_broadcast()` at once. Until units are recorded the scan
+response is left out and the broadcast is non-scannable.
 
 ---
 

@@ -451,27 +451,39 @@ bool NimbleBleServer::stop_advertising() {
 }
 
 #if MYNEWT_VAL(BLE_EXT_ADV)
-bool NimbleBleServer::set_broadcast_data(const uint8_t *data, size_t len) {
-  if (_server == nullptr || data == nullptr || len == 0 || len > BLE_HS_ADV_MAX_SZ) {
+bool NimbleBleServer::set_broadcast_data(const uint8_t *data, size_t len, const uint8_t *scan_rsp,
+                                         size_t scan_rsp_len) {
+  if (_server == nullptr || data == nullptr || len == 0 || len > BLE_HS_ADV_MAX_SZ ||
+      scan_rsp_len > BLE_HS_ADV_MAX_SZ) {
     return false;
   }
+  const bool scannable = scan_rsp != nullptr && scan_rsp_len > 0;
 
   NimBLEExtAdvertising *advertising = NimBLEDevice::getAdvertising();
   if (advertising == nullptr || !stop_adv_instance(*advertising, BROADCAST_ADV_INSTANCE)) {
     return false;
   }
 
-  // Non-connectable, non-scannable legacy PDU (ADV_NONCONN_IND) at the
-  // interval NimBLE uses by default for non-connectable advertising.
+  // Non-connectable legacy PDU at the interval NimBLE uses by default for
+  // non-connectable advertising: ADV_SCAN_IND with a scan response,
+  // otherwise ADV_NONCONN_IND.
   NimBLEExtAdvertisement broadcast;
   broadcast.setLegacyAdvertising(true);
   broadcast.setConnectable(false);
-  broadcast.setScannable(false);
+  broadcast.setScannable(scannable);
   broadcast.setMinInterval(BLE_GAP_ADV_FAST_INTERVAL2_MIN);
   broadcast.setMaxInterval(BLE_GAP_ADV_FAST_INTERVAL2_MAX);
   if (!broadcast.setData(data, len) ||
       !advertising->setInstanceData(BROADCAST_ADV_INSTANCE, broadcast)) {
     return false;
+  }
+  if (scannable) {
+    NimBLEExtAdvertisement response;
+    response.setLegacyAdvertising(true);
+    if (!response.setData(scan_rsp, scan_rsp_len) ||
+        !advertising->setScanResponseData(BROADCAST_ADV_INSTANCE, response)) {
+      return false;
+    }
   }
   return advertising->start(BROADCAST_ADV_INSTANCE);
 }

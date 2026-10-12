@@ -86,7 +86,8 @@ public:
   bool start_advertising() override;
   bool stop_advertising() override;
 #if MYNEWT_VAL(BLE_EXT_ADV)
-  bool set_broadcast_data(const uint8_t *data, size_t len) override;
+  bool set_broadcast_data(const uint8_t *data, size_t len, const uint8_t *scan_rsp,
+                          size_t scan_rsp_len) override;
   bool stop_broadcast() override;
 #endif
   bool request_conn_params(uint16_t min_interval_ms, uint16_t max_interval_ms, uint16_t latency,

@@ -190,10 +190,13 @@ must be set after `init()` and before `start_advertising()`.
 
 ### Broadcast Advertisement
 
-`set_broadcast_data(data, len)` sends a caller-built AD payload (at most 31
-bytes) as a second, non-connectable and non-scannable legacy advertisement,
-for data that passive scanners read without connecting (the Go uses it for a
-BTHome v2 sensor broadcast). A later call replaces the payload. It runs
+`set_broadcast_data(data, len, scan_rsp, scan_rsp_len)` sends a caller-built
+AD payload (at most 31 bytes) as a second, non-connectable legacy
+advertisement, for data that passive scanners read without connecting (the Go
+uses it for a BTHome v2 sensor broadcast). With a scan response (at most 31
+bytes) the advertisement is scannable (`ADV_SCAN_IND`) and active scanners
+also get that; without one (`nullptr`, 0) it is `ADV_NONCONN_IND`. A later
+call replaces both. It runs
 independently of the connectable advertisement: `stop_advertising()` and a
 client connection leave it running; `stop_broadcast()` or `deinit()` stop it.
 
