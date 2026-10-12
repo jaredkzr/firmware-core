@@ -98,9 +98,11 @@ public:
     return true;
   }
 
-  bool set_broadcast_data(const uint8_t *data, size_t len) override {
+  bool set_broadcast_data(const uint8_t *data, size_t len, const uint8_t *scan_rsp,
+                          size_t scan_rsp_len) override {
     broadcast_count++;
     broadcast_data.assign(data, data + len);
+    broadcast_scan_rsp.assign(scan_rsp, scan_rsp + (scan_rsp != nullptr ? scan_rsp_len : 0));
     return broadcast_result;
   }
 
@@ -118,6 +120,7 @@ public:
   bool peer_authenticated = false;
   int broadcast_count = 0;
   std::vector<uint8_t> broadcast_data;
+  std::vector<uint8_t> broadcast_scan_rsp;
   bool broadcast_result = true;
 
   void reset() {
@@ -2983,11 +2986,22 @@ TEST_CASE("BLE: refresh_broadcast sends the recorded BTHome measurement") {
   uint8_t expected[BTHOME_ADV_MAX_LEN];
   const size_t len = encode_bthome_adv(readings, 1, expected, sizeof(expected));
   CHECK(server.broadcast_data == std::vector<uint8_t>(expected, expected + len));
+  CHECK(server.broadcast_scan_rsp.empty()); // units not recorded yet
+
+  // Recorded units go out in the scan response.
+  BthomeUnits units{};
+  units.fahrenheit = true;
+  set_rtc_bthome_units(units);
+  svc.refresh_broadcast();
+  uint8_t rsp[BTHOME_SCAN_RSP_LEN];
+  REQUIRE(encode_bthome_scan_rsp(units, rsp, sizeof(rsp)) == BTHOME_SCAN_RSP_LEN);
+  CHECK(server.broadcast_scan_rsp == std::vector<uint8_t>(rsp, rsp + sizeof(rsp)));
+  CHECK(server.broadcast_data == std::vector<uint8_t>(expected, expected + len));
 
   // A failed broadcast is logged only and leaves the data service alone.
   server.broadcast_result = false;
   svc.refresh_broadcast();
-  CHECK(server.broadcast_count == 2);
+  CHECK(server.broadcast_count == 3);
   CHECK(server.start_advertising_count == 0);
   clear_rtc_bthome();
 }

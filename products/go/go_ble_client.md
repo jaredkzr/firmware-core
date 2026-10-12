@@ -65,7 +65,10 @@ The complete local name is placed in the scan response data.
 - The device also sends a non-connectable BTHome v2 sensor broadcast
   (service data UUID `0xFCD2`) from the same address, including while a client
   is connected. It carries no data-service UUID or name, so a UUID or name
-  filter ignores it; do not try to connect to it.
+  filter ignores it; do not try to connect to it. Its scan response carries
+  manufacturer data `FF FF 01 <flags>` (company id 0xFFFF, version 1; flags bit
+  0 = °F, bit 1 = PM as US AQI, bit 2 = altitude in feet) mirroring `temp_f`,
+  `pm_aqi`, and `alt_ft`.
 
 ### Connection Parameters
 

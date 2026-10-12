@@ -10,6 +10,7 @@
 #include <catch2/catch_test_macros.hpp>
 
 #include "go_bthome.h"
+#include "go_settings.h"
 
 #include <cmath>
 #include <vector>
@@ -119,6 +120,66 @@ TEST_CASE("BTHome: readings take only validated fields", "[BTHome]") {
   CHECK(bthome_readings_from(m, MeasuresInvalid::BATTERY_PERCENT).battery_pct ==
         MeasuresInvalid::BATTERY_PERCENT);
   CHECK(bthome_readings_from(m, NAN).battery_pct == MeasuresInvalid::BATTERY_PERCENT);
+}
+
+TEST_CASE("BTHome: scan response carries the display units", "[BTHome]") {
+  uint8_t buf[BTHOME_SCAN_RSP_LEN];
+  REQUIRE(encode_bthome_scan_rsp(BthomeUnits{}, buf, sizeof(buf)) == BTHOME_SCAN_RSP_LEN);
+  const std::vector<uint8_t> metric(buf, buf + sizeof(buf));
+  CHECK(metric == std::vector<uint8_t>{0x05, 0xFF, 0xFF, 0xFF, 0x01, 0x00});
+
+  BthomeUnits units{};
+  units.fahrenheit = true;
+  units.pm_us_aqi = true;
+  units.altitude_feet = true;
+  REQUIRE(encode_bthome_scan_rsp(units, buf, sizeof(buf)) == BTHOME_SCAN_RSP_LEN);
+  CHECK(buf[5] == 0x07);
+
+  units.pm_us_aqi = false;
+  units.altitude_feet = false;
+  REQUIRE(encode_bthome_scan_rsp(units, buf, sizeof(buf)) == BTHOME_SCAN_RSP_LEN);
+  CHECK(buf[5] == BTHOME_UNITS_FLAG_FAHRENHEIT);
+
+  CHECK(encode_bthome_scan_rsp(units, buf, BTHOME_SCAN_RSP_LEN - 1) == 0);
+  CHECK(encode_bthome_scan_rsp(units, nullptr, sizeof(buf)) == 0);
+}
+
+TEST_CASE("BTHome: display units come from the settings", "[BTHome]") {
+  GoSettings settings{};
+  CHECK(bthome_units_from(settings) == BthomeUnits{});
+  settings.use_fahrenheit = true;
+  settings.use_feet = true;
+  const BthomeUnits units = bthome_units_from(settings);
+  CHECK(units.fahrenheit);
+  CHECK_FALSE(units.pm_us_aqi);
+  CHECK(units.altitude_feet);
+}
+
+TEST_CASE("BTHome: RTC units are kept apart from the measurement", "[BTHome]") {
+  clear_rtc_bthome();
+  BthomeUnits units{};
+  CHECK_FALSE(load_rtc_bthome_units(units));
+
+  BthomeUnits fahrenheit{};
+  fahrenheit.fahrenheit = true;
+  CHECK(set_rtc_bthome_units(fahrenheit)); // first record counts as a change
+  CHECK_FALSE(set_rtc_bthome_units(fahrenheit));
+  REQUIRE(load_rtc_bthome_units(units));
+  CHECK(units == fahrenheit);
+
+  // Units don't advance the packet id, and a measurement keeps the units.
+  save_rtc_bthome(BthomeReadings{});
+  CHECK(set_rtc_bthome_units(BthomeUnits{}));
+  BthomeReadings r{};
+  uint8_t packet_id = 0xFF;
+  REQUIRE(load_rtc_bthome(r, packet_id));
+  CHECK(packet_id == 0);
+  save_rtc_bthome(BthomeReadings{});
+  REQUIRE(load_rtc_bthome_units(units));
+  CHECK(units == BthomeUnits{});
+
+  clear_rtc_bthome();
+  CHECK_FALSE(load_rtc_bthome_units(units));
 }
 
 TEST_CASE("BTHome: RTC record advances the packet id per measurement", "[BTHome]") {

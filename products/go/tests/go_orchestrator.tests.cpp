@@ -4243,6 +4243,47 @@ TEST_CASE("on_sensor_data: records corrected readings for the BTHome broadcast",
   CHECK(readings.temperature_c == A::corrected_measures(orch).temp_hum_a.temperature);
   CHECK(readings.battery_pct == 54.0f);
   CHECK(test_spy::ble_refresh_broadcast_count == 2);
+  BthomeUnits units{};
+  REQUIRE(load_rtc_bthome_units(units));
+  CHECK(units == BthomeUnits{});
+  clear_rtc_bthome();
+}
+
+TEST_CASE("dispatch: a unit change re-broadcasts BTHome with the new units",
+          "[Orchestrator][dispatch][config]") {
+  TestFixture f;
+  auto orch = f.make_orchestrator();
+  clear_rtc_bthome();
+  ALLOW_CALL(f.mock_config, set_int(trompeloeil::_, trompeloeil::_)).RETURN(ConfigStoreResult::OK);
+  ALLOW_CALL(f.mock_config, set_bool(trompeloeil::_, trompeloeil::_)).RETURN(ConfigStoreResult::OK);
+  ALLOW_CALL(f.mock_config, set_string(trompeloeil::_, trompeloeil::_))
+      .RETURN(ConfigStoreResult::OK);
+  ALLOW_CALL(f.mock_config, commit()).RETURN(ConfigStoreResult::OK);
+  set_rtc_bthome_units(bthome_units_from(A::settings(orch)));
+  const int refreshes = test_spy::ble_refresh_broadcast_count;
+
+  Event evt{};
+  evt.type = EventType::FetchConfigResult;
+  evt.fetch_config.result = static_cast<CloudResultByte>(AgClientResult::Ok);
+  evt.fetch_config.update.update_mask = static_cast<uint32_t>(GoConfigField::TemperatureUnit) |
+                                        static_cast<uint32_t>(GoConfigField::PmStandard);
+  evt.fetch_config.update.use_fahrenheit = true;
+  evt.fetch_config.update.pm_use_usaqi = true;
+  A::dispatch(orch, evt);
+
+  REQUIRE(A::settings(orch).use_fahrenheit);
+  CHECK(test_spy::ble_refresh_broadcast_count == refreshes + 1);
+  BthomeUnits units{};
+  REQUIRE(load_rtc_bthome_units(units));
+  CHECK(units.fahrenheit);
+  CHECK(units.pm_us_aqi);
+  CHECK_FALSE(units.altitude_feet);
+
+  // Other changes leave the broadcast alone.
+  evt.fetch_config.update.update_mask = static_cast<uint32_t>(GoConfigField::BuzzerEnabled);
+  evt.fetch_config.update.buzzer_enabled = !A::settings(orch).buzzer_enabled;
+  A::dispatch(orch, evt);
+  CHECK(test_spy::ble_refresh_broadcast_count == refreshes + 1);
   clear_rtc_bthome();
 }
 

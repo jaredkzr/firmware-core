@@ -152,17 +152,22 @@ public:
   // broadcast advertisement (set_broadcast_data()) running.
   virtual bool stop_advertising() = 0;
 
-  // Broadcast advertisement: a second, non-connectable and non-scannable
-  // legacy advertisement sent alongside the connectable one, so passive
-  // scanners can read its payload without connecting. It keeps running while
-  // a client is connected. @p data is the complete AD-structure payload
-  // (at most 31 bytes); a call while broadcasting replaces the payload.
-  // Must be called after init(). Default unsupported (returns false) so
-  // servers built without multi-advertising, and test doubles, need not
-  // implement it.
-  virtual bool set_broadcast_data(const uint8_t *data, size_t len) {
+  // Broadcast advertisement: a second, non-connectable legacy advertisement
+  // sent alongside the connectable one, so passive scanners can read its
+  // payload without connecting. It keeps running while a client is
+  // connected. @p data is the complete AD-structure payload (at most 31
+  // bytes); a call while broadcasting replaces the payload. With a
+  // @p scan_rsp (at most 31 bytes) the advertisement is scannable and active
+  // scanners also get that scan response; without one (nullptr or length 0)
+  // it is non-scannable. Must be called after init(). Default unsupported
+  // (returns false) so servers built without multi-advertising, and test
+  // doubles, need not implement it.
+  virtual bool set_broadcast_data(const uint8_t *data, size_t len, const uint8_t *scan_rsp,
+                                  size_t scan_rsp_len) {
     (void)data;
     (void)len;
+    (void)scan_rsp;
+    (void)scan_rsp_len;
     return false;
   }
 

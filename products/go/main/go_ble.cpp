@@ -681,7 +681,13 @@ void BleService::refresh_broadcast() {
   }
   uint8_t adv[BTHOME_ADV_MAX_LEN];
   const size_t len = encode_bthome_adv(readings, packet_id, adv, sizeof(adv));
-  if (len == 0 || !_server->set_broadcast_data(adv, len)) {
+  // The scan response tells apps which units the Go displays; it is left out
+  // until the units have been recorded.
+  uint8_t rsp[BTHOME_SCAN_RSP_LEN];
+  BthomeUnits units{};
+  const size_t rsp_len =
+      load_rtc_bthome_units(units) ? encode_bthome_scan_rsp(units, rsp, sizeof(rsp)) : 0;
+  if (len == 0 || !_server->set_broadcast_data(adv, len, rsp_len > 0 ? rsp : nullptr, rsp_len)) {
     AG_LOGW(TAG, "BTHome broadcast not started");
     return;
   }
