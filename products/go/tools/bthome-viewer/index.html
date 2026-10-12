@@ -1,0 +1,535 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover">
+<meta name="theme-color" content="#f6f6f4" media="(prefers-color-scheme: light)">
+<meta name="theme-color" content="#1a1a19" media="(prefers-color-scheme: dark)">
+<title>Go Air Viewer</title>
+<style>
+  :root {
+    --bg: #f6f6f4;
+    --surface: #ffffff;
+    --border: #e4e3df;
+    --text: #1b1b1a;
+    --text-2: #55554f;
+    --text-3: #85847d;
+    --accent: #2a6fdb;
+    --accent-ink: #ffffff;
+    --grid: #ecebe7;
+    --good: #0ca30c;
+    --warning: #fab219;
+    --serious: #ec835a;
+    --critical: #d03b3b;
+    color-scheme: light;
+  }
+  @media (prefers-color-scheme: dark) {
+    :root {
+      --bg: #1a1a19;
+      --surface: #242422;
+      --border: #34342f;
+      --text: #f1f0ec;
+      --text-2: #b9b8b1;
+      --text-3: #8a8981;
+      --accent: #6aa1f5;
+      --accent-ink: #10141a;
+      --grid: #2e2e2a;
+      color-scheme: dark;
+    }
+  }
+  * { box-sizing: border-box; }
+  html, body { margin: 0; }
+  body {
+    background: var(--bg);
+    color: var(--text);
+    font: 15px/1.4 system-ui, -apple-system, "Segoe UI", Roboto, sans-serif;
+    padding: max(16px, env(safe-area-inset-top)) 16px max(24px, env(safe-area-inset-bottom));
+    -webkit-tap-highlight-color: transparent;
+  }
+  main { max-width: 720px; margin: 0 auto; }
+  header { display: flex; align-items: center; gap: 12px; margin-bottom: 12px; }
+  header .titles { flex: 1; min-width: 0; }
+  h1 { font-size: 20px; margin: 0; font-weight: 650; }
+  #status { color: var(--text-2); font-size: 13px; margin-top: 2px; }
+  #status.stale { color: var(--critical); }
+  button, select {
+    font: inherit; color: var(--text); background: var(--surface);
+    border: 1px solid var(--border); border-radius: 10px; padding: 8px 14px;
+  }
+  button.primary { background: var(--accent); color: var(--accent-ink); border-color: transparent; font-weight: 600; min-width: 84px; }
+  button:disabled { opacity: .5; }
+  .notice {
+    background: var(--surface); border: 1px solid var(--border); border-left: 4px solid var(--warning);
+    border-radius: 10px; padding: 12px 14px; margin-bottom: 12px; color: var(--text-2); font-size: 14px;
+  }
+  .notice strong { color: var(--text); }
+  .notice code { font-size: 13px; word-break: break-all; }
+  #device-row { display: none; margin-bottom: 12px; }
+  #device-row select { width: 100%; }
+  .grid { display: grid; grid-template-columns: repeat(2, minmax(0, 1fr)); gap: 10px; }
+  @media (min-width: 560px) { .grid { grid-template-columns: repeat(3, minmax(0, 1fr)); } }
+  .tile {
+    background: var(--surface); border: 1px solid var(--border); border-radius: 14px;
+    padding: 12px 12px 10px; display: flex; flex-direction: column; min-width: 0;
+  }
+  .tile.wide { grid-column: span 2; }
+  .tile-head { display: flex; justify-content: space-between; align-items: baseline; gap: 6px; }
+  .label { color: var(--text-2); font-size: 13px; font-weight: 550; }
+  .value { font-size: 30px; font-weight: 650; line-height: 1.1; margin-top: 4px; white-space: nowrap; }
+  .tile.wide .value { font-size: 44px; }
+  .unit { font-size: 14px; font-weight: 500; color: var(--text-3); margin-left: 3px; }
+  .chip { display: inline-flex; align-items: center; gap: 5px; font-size: 12px; color: var(--text-2); white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
+  .chip i { width: 9px; height: 9px; border-radius: 50%; flex: none; background: var(--c); }
+  .spark { position: relative; margin-top: 8px; height: 40px; touch-action: pan-y; }
+  .tile.wide .spark { height: 56px; }
+  .spark svg { width: 100%; height: 100%; display: block; overflow: visible; }
+  .spark .line { fill: none; stroke: var(--accent); stroke-width: 2; stroke-linejoin: round; stroke-linecap: round; vector-effect: non-scaling-stroke; }
+  .spark .area { fill: var(--accent); opacity: .08; }
+  .spark .cursor { stroke: var(--text-3); stroke-width: 1; vector-effect: non-scaling-stroke; }
+  .spark .dot { position: absolute; width: 8px; height: 8px; margin: -4px 0 0 -4px; border-radius: 50%; background: var(--accent); box-shadow: 0 0 0 2px var(--surface); pointer-events: none; }
+  .spark .tip {
+    position: absolute; bottom: calc(100% + 4px); transform: translateX(-50%); pointer-events: none;
+    background: var(--text); color: var(--bg); font-size: 12px; padding: 3px 7px; border-radius: 6px; white-space: nowrap;
+  }
+  .range { color: var(--text-3); font-size: 11px; margin-top: 4px; font-variant-numeric: tabular-nums; min-height: 15px; }
+  footer { margin-top: 14px; display: flex; flex-wrap: wrap; gap: 8px 14px; align-items: center; color: var(--text-2); font-size: 13px; }
+  footer .spacer { flex: 1; }
+  .seg { display: inline-flex; border: 1px solid var(--border); border-radius: 10px; overflow: hidden; }
+  .seg button { border: 0; border-radius: 0; padding: 6px 12px; }
+  .seg button[aria-pressed="true"] { background: var(--accent); color: var(--accent-ink); }
+  label.check { display: inline-flex; align-items: center; gap: 6px; }
+  #meta { width: 100%; color: var(--text-3); font-size: 12px; font-variant-numeric: tabular-nums; }
+</style>
+</head>
+<body>
+<main>
+  <header>
+    <div class="titles">
+      <h1>Go Air Viewer</h1>
+      <div id="status">Not scanning</div>
+    </div>
+    <button id="scan" class="primary">Start</button>
+  </header>
+
+  <div id="notices"></div>
+
+  <div id="device-row">
+    <select id="device" aria-label="Device"></select>
+  </div>
+
+  <div class="grid" id="tiles"></div>
+
+  <footer>
+    <div class="seg" role="group" aria-label="Temperature unit">
+      <button data-unit="C">°C</button><button data-unit="F">°F</button>
+    </div>
+    <label class="check"><input type="checkbox" id="wake"> Keep screen on</label>
+    <span class="spacer"></span>
+    <button id="clear">Clear history</button>
+    <div id="meta"></div>
+  </footer>
+</main>
+
+<script type="module">
+import { BTHOME_UUID, decodeServiceData } from './bthome.js';
+
+const HISTORY_MS = 4 * 60 * 60 * 1000; // matches the Go's chart span
+const STALE_MS = 3 * 60 * 1000;        // Portable Sleep measures about once a minute
+const REPEAT_GAP_MS = 30 * 60 * 1000;  // same packet id after this long is a new reading
+const STORAGE_KEY = 'go-bthome-viewer/v1';
+const PREFS_KEY = 'go-bthome-viewer/prefs';
+
+// Bands: [upper bound, status, label]. Status colors always come with a label.
+const METRICS = [
+  { key: 'pm25', label: 'PM2.5', unit: 'µg/m³', wide: true,
+    bands: [[9, 'good', 'Good'], [35.4, 'warning', 'Moderate'], [55.4, 'serious', 'Unhealthy for sensitive'], [Infinity, 'critical', 'Unhealthy']] },
+  { key: 'co2', label: 'CO₂', unit: 'ppm',
+    bands: [[800, 'good', 'Good'], [1000, 'warning', 'Moderate'], [1500, 'serious', 'Poor'], [Infinity, 'critical', 'High']] },
+  { key: 'temperature', label: 'Temperature', unit: '°C', digits: 1 },
+  { key: 'humidity', label: 'Humidity', unit: '%' },
+  { key: 'tvoc', label: 'TVOC index', unit: '',
+    bands: [[150, 'good', 'Good'], [250, 'warning', 'Moderate'], [400, 'serious', 'Poor'], [Infinity, 'critical', 'High']] },
+  { key: 'nox', label: 'NOx index', unit: '',
+    bands: [[20, 'good', 'Good'], [150, 'warning', 'Moderate'], [300, 'serious', 'Poor'], [Infinity, 'critical', 'High']] },
+  { key: 'battery', label: 'Battery', unit: '%',
+    bands: [[10, 'critical', 'Low'], [25, 'warning', 'Getting low'], [Infinity, 'good', 'OK']] },
+];
+const FIELDS = METRICS.map(m => m.key);
+
+const $ = id => document.getElementById(id);
+const devices = new Map(); // id -> { id, name, rssi, lastSeen, latest, history: [{ t, packetId, ...fields }] }
+let selectedId = null;
+let scan = null;
+let wantScan = false;
+let wakeLock = null;
+let prefs = { unit: 'C', wake: false };
+
+// ---- storage (best effort; the page works without it) ----
+function loadState() {
+  try {
+    const p = JSON.parse(localStorage.getItem(PREFS_KEY) || 'null');
+    if (p) prefs = { ...prefs, ...p };
+    const saved = JSON.parse(localStorage.getItem(STORAGE_KEY) || 'null');
+    if (saved?.devices) {
+      for (const d of saved.devices) {
+        const history = prune(d.history || []);
+        if (!history.length) continue;
+        const latest = history.at(-1);
+        devices.set(d.id, { id: d.id, name: d.name, rssi: null, lastSeen: latest.t, latest, history });
+      }
+      selectedId = devices.has(saved.selectedId) ? saved.selectedId : null;
+    }
+  } catch { /* storage unavailable */ }
+}
+function saveState() {
+  if (demo) return;
+  try {
+    const out = [...devices.values()].map(d => ({ id: d.id, name: d.name, history: d.history }));
+    localStorage.setItem(STORAGE_KEY, JSON.stringify({ selectedId, devices: out }));
+  } catch { /* storage unavailable */ }
+}
+function savePrefs() {
+  try { localStorage.setItem(PREFS_KEY, JSON.stringify(prefs)); } catch { /* storage unavailable */ }
+}
+function prune(history) {
+  const cutoff = Date.now() - HISTORY_MS;
+  return history.filter(p => p.t >= cutoff);
+}
+
+// ---- BLE ----
+function onAdvertisement(event) {
+  const data = event.serviceData?.get(BTHOME_UUID);
+  if (!data) return;
+  const reading = decodeServiceData(data);
+  if (!reading || reading.packetId === undefined) return;
+
+  const now = Date.now();
+  const id = event.device.id;
+  let d = devices.get(id);
+  if (!d) {
+    d = { id, name: null, rssi: null, lastSeen: 0, latest: null, history: [] };
+    devices.set(id, d);
+  }
+  d.name = event.device.name || event.name || d.name;
+  d.rssi = event.rssi ?? d.rssi;
+  d.lastSeen = now;
+
+  const point = { t: now, packetId: reading.packetId };
+  for (const k of FIELDS) if (reading[k] !== undefined) point[k] = reading[k];
+  d.latest = point;
+
+  // Connect-window wakes repeat the last measurement under the same packet id.
+  const last = d.history.at(-1);
+  if (!last || last.packetId !== reading.packetId || now - last.t > REPEAT_GAP_MS) {
+    d.history = prune([...d.history, point]);
+    saveState();
+  }
+
+  // Prefer a device that looks like a Go (CO2 present) over other BTHome sensors.
+  const sel = devices.get(selectedId);
+  if (!sel || (sel.latest?.co2 === undefined && point.co2 !== undefined)) selectedId = id;
+  render();
+}
+
+async function startScan() {
+  wantScan = true;
+  try {
+    scan = await navigator.bluetooth.requestLEScan({ acceptAllAdvertisements: true, keepRepeatedDevices: true });
+    clearNotice('scan');
+  } catch (err) {
+    scan = null;
+    wantScan = false;
+    showNotice('scan', `<strong>Couldn't start scanning:</strong> ${escapeHtml(err.message || err.name)}`);
+  }
+  updateWakeLock();
+  render();
+}
+function stopScan() {
+  wantScan = false;
+  scan?.stop();
+  scan = null;
+  updateWakeLock();
+  render();
+}
+
+document.addEventListener('visibilitychange', async () => {
+  if (document.visibilityState !== 'visible') return;
+  if (wantScan && !scan?.active) {
+    try {
+      scan = await navigator.bluetooth.requestLEScan({ acceptAllAdvertisements: true, keepRepeatedDevices: true });
+    } catch {
+      scan = null;
+      wantScan = false;
+      showNotice('scan', 'Scanning paused while the page was in the background. Tap <strong>Start</strong> to resume.');
+    }
+  }
+  updateWakeLock();
+  render();
+});
+
+async function updateWakeLock() {
+  const want = prefs.wake && wantScan && document.visibilityState === 'visible';
+  try {
+    if (want && !wakeLock && 'wakeLock' in navigator) {
+      wakeLock = await navigator.wakeLock.request('screen');
+      wakeLock.addEventListener('release', () => { wakeLock = null; });
+    } else if (!want && wakeLock) {
+      await wakeLock.release();
+      wakeLock = null;
+    }
+  } catch { wakeLock = null; }
+}
+
+// ---- support checks ----
+function checkSupport() {
+  if (!window.isSecureContext) {
+    showNotice('support', `<strong>Bluetooth needs a secure origin.</strong> Open this page as <code>http://localhost</code>,
+      or in Chrome go to <code>chrome://flags/#unsafely-treat-insecure-origin-as-secure</code>, add
+      <code>${escapeHtml(location.origin)}</code>, enable it and relaunch.`);
+    return false;
+  }
+  if (!navigator.bluetooth) {
+    showNotice('support', '<strong>Web Bluetooth isn\'t available.</strong> Use Chrome on Android with Bluetooth turned on.');
+    return false;
+  }
+  if (!navigator.bluetooth.requestLEScan) {
+    showNotice('support', `<strong>BLE scanning is behind a Chrome flag.</strong> Go to
+      <code>chrome://flags/#enable-experimental-web-platform-features</code>, enable it and relaunch Chrome.`);
+    return false;
+  }
+  navigator.bluetooth.addEventListener('advertisementreceived', onAdvertisement);
+  return true;
+}
+
+// ---- rendering ----
+function escapeHtml(s) {
+  return String(s).replace(/[&<>"']/g, c => ({ '&': '&amp;', '<': '&lt;', '>': '&gt;', '"': '&quot;', "'": '&#39;' }[c]));
+}
+function showNotice(key, html) {
+  let el = document.querySelector(`.notice[data-key="${key}"]`);
+  if (!el) {
+    el = document.createElement('div');
+    el.className = 'notice';
+    el.dataset.key = key;
+    $('notices').append(el);
+  }
+  el.innerHTML = html;
+}
+function clearNotice(key) {
+  document.querySelector(`.notice[data-key="${key}"]`)?.remove();
+}
+
+function displayValue(m, v) {
+  if (v === undefined || v === null) return null;
+  if (m.key === 'temperature' && prefs.unit === 'F') v = v * 9 / 5 + 32;
+  return v.toFixed(m.digits ?? 0);
+}
+function unitFor(m) {
+  return m.key === 'temperature' ? `°${prefs.unit}` : m.unit;
+}
+function bandFor(m, v) {
+  return m.bands?.find(([max]) => v <= max);
+}
+function duration(ms) {
+  const s = Math.max(0, Math.round(ms / 1000));
+  if (s < 60) return `${s} s`;
+  if (s < 3600) return `${Math.round(s / 60)} min`;
+  return `${Math.round(s / 3600)} h`;
+}
+const timeFmt = new Intl.DateTimeFormat(undefined, { hour: 'numeric', minute: '2-digit' });
+
+function buildTiles() {
+  $('tiles').innerHTML = METRICS.map(m => `
+    <section class="tile${m.wide ? ' wide' : ''}" data-key="${m.key}">
+      <div class="tile-head"><span class="label">${m.label}</span><span class="chip"></span></div>
+      <div class="value"></div>
+      <div class="spark"><svg viewBox="0 0 100 100" preserveAspectRatio="none" aria-hidden="true"></svg></div>
+      <div class="range"></div>
+    </section>`).join('');
+  for (const tile of document.querySelectorAll('.tile')) {
+    const spark = tile.querySelector('.spark');
+    const m = METRICS.find(x => x.key === tile.dataset.key);
+    spark.addEventListener('pointermove', e => showCursor(spark, m, e));
+    spark.addEventListener('pointerdown', e => showCursor(spark, m, e));
+    spark.addEventListener('pointerleave', () => renderSpark(spark, m));
+    spark.addEventListener('pointercancel', () => renderSpark(spark, m));
+  }
+}
+
+function seriesFor(m) {
+  const d = devices.get(selectedId);
+  return d ? d.history.filter(p => p[m.key] !== undefined) : [];
+}
+function scales(points, key) {
+  const t0 = points[0].t;
+  const t1 = points.at(-1).t;
+  let lo = Math.min(...points.map(p => p[key]));
+  let hi = Math.max(...points.map(p => p[key]));
+  if (hi - lo < 1e-9) { lo -= 1; hi += 1; }
+  const pad = (hi - lo) * 0.12;
+  lo -= pad; hi += pad;
+  return {
+    x: t => (t1 === t0 ? 100 : ((t - t0) / (t1 - t0)) * 100),
+    y: v => 100 - ((v - lo) / (hi - lo)) * 100,
+  };
+}
+
+function renderSpark(spark, m, cursorIndex = null) {
+  const svg = spark.querySelector('svg');
+  spark.querySelectorAll('.dot, .tip').forEach(el => el.remove());
+  const points = seriesFor(m);
+  if (!points.length) { svg.innerHTML = ''; return; }
+  const { x, y } = scales(points, m.key);
+  const coords = points.map(p => [x(p.t), y(p[m.key])]);
+  const line = coords.map(([a, b]) => `${a.toFixed(2)},${b.toFixed(2)}`).join(' ');
+  let html = points.length > 1
+    ? `<polygon class="area" points="0,100 ${line} 100,100"/><polyline class="line" points="${line}"/>`
+    : '';
+  const i = cursorIndex ?? points.length - 1;
+  if (cursorIndex !== null) html += `<line class="cursor" x1="${coords[i][0]}" x2="${coords[i][0]}" y1="0" y2="100"/>`;
+  svg.innerHTML = html;
+
+  const dot = document.createElement('div');
+  dot.className = 'dot';
+  dot.style.left = `${coords[i][0]}%`;
+  dot.style.top = `${coords[i][1]}%`;
+  spark.append(dot);
+
+  if (cursorIndex !== null) {
+    const tip = document.createElement('div');
+    tip.className = 'tip';
+    const p = points[i];
+    tip.textContent = `${displayValue(m, p[m.key])}${unitFor(m) ? ' ' + unitFor(m) : ''} · ${timeFmt.format(p.t)}`;
+    tip.style.left = `${Math.min(80, Math.max(20, coords[i][0]))}%`;
+    spark.append(tip);
+  }
+}
+
+function showCursor(spark, m, e) {
+  const points = seriesFor(m);
+  if (!points.length) return;
+  const rect = spark.getBoundingClientRect();
+  const frac = Math.min(1, Math.max(0, (e.clientX - rect.left) / rect.width));
+  const { x } = scales(points, m.key);
+  let best = 0;
+  for (let i = 1; i < points.length; i++) {
+    if (Math.abs(x(points[i].t) / 100 - frac) < Math.abs(x(points[best].t) / 100 - frac)) best = i;
+  }
+  renderSpark(spark, m, best);
+}
+
+function render() {
+  const now = Date.now();
+  const d = devices.get(selectedId);
+  const stale = d && now - d.lastSeen > STALE_MS;
+
+  $('scan').textContent = wantScan ? 'Stop' : 'Start';
+  const status = $('status');
+  status.classList.toggle('stale', Boolean(stale));
+  if (!d) {
+    status.textContent = wantScan ? 'Scanning for the Go’s broadcast…' : 'Not scanning';
+  } else {
+    const age = duration(now - d.lastSeen);
+    status.textContent = (stale ? `No broadcast for ${age}` : `Updated ${age} ago`) + (wantScan ? '' : ' · not scanning');
+  }
+
+  // Device picker only when several BTHome devices are around.
+  const row = $('device-row');
+  row.style.display = devices.size > 1 ? 'block' : 'none';
+  if (devices.size > 1) {
+    const sel = $('device');
+    const opts = [...devices.values()].map(x =>
+      `<option value="${escapeHtml(x.id)}"${x.id === selectedId ? ' selected' : ''}>${escapeHtml(deviceName(x))}${x.latest?.co2 !== undefined ? '' : ' (not a Go?)'}</option>`).join('');
+    if (sel.innerHTML !== opts) sel.innerHTML = opts;
+  }
+
+  for (const m of METRICS) {
+    const tile = document.querySelector(`.tile[data-key="${m.key}"]`);
+    const raw = d?.latest?.[m.key];
+    const shown = displayValue(m, raw);
+    const unit = unitFor(m);
+    tile.querySelector('.value').innerHTML = shown === null
+      ? '<span class="unit" style="margin:0">—</span>'
+      : `${shown}${unit ? `<span class="unit">${unit}</span>` : ''}`;
+    const band = shown === null ? null : bandFor(m, raw);
+    tile.querySelector('.chip').innerHTML = band ? `<i style="--c: var(--${band[1]})"></i>${band[2]}` : '';
+    tile.style.opacity = stale ? 0.6 : 1;
+
+    const spark = tile.querySelector('.spark');
+    if (!spark.querySelector('.tip')) renderSpark(spark, m);
+    const pts = seriesFor(m);
+    const range = tile.querySelector('.range');
+    if (pts.length > 1) {
+      const vals = pts.map(p => p[m.key]);
+      const lo = displayValue(m, Math.min(...vals));
+      const hi = displayValue(m, Math.max(...vals));
+      range.textContent = `${timeFmt.format(pts[0].t)}–now · ${lo}–${hi}`;
+    } else {
+      range.textContent = '';
+    }
+  }
+
+  const meta = [];
+  if (d) {
+    meta.push(deviceName(d));
+    if (d.latest) meta.push(`packet #${d.latest.packetId}`);
+    if (d.rssi !== null && d.rssi !== undefined) meta.push(`${d.rssi} dBm`);
+    meta.push(`${d.history.length} readings in last 4 h`);
+  }
+  $('meta').textContent = meta.join(' · ');
+
+  for (const b of document.querySelectorAll('.seg button')) {
+    b.setAttribute('aria-pressed', String(b.dataset.unit === prefs.unit));
+  }
+  $('wake').checked = prefs.wake;
+}
+function deviceName(d) {
+  return d.name || `BTHome ${d.id.slice(0, 6)}`;
+}
+
+// ---- demo (open with #demo to preview without a Go) ----
+function startDemo() {
+  const now = Date.now();
+  const history = [];
+  for (let t = now - HISTORY_MS, i = 0; t < now; t += 61000, i++) {
+    const w = i / 60;
+    history.push({
+      t, packetId: i % 256,
+      pm25: Math.max(1, Math.round(6 + 5 * Math.sin(w) + (i % 47 < 4 ? 30 : 0))),
+      co2: Math.round(650 + 250 * Math.sin(w / 2) + 3 * (i % 7)),
+      temperature: Math.round((22.5 + 1.5 * Math.sin(w / 3)) * 100) / 100,
+      humidity: Math.round(45 + 6 * Math.cos(w / 2)),
+      tvoc: Math.round(100 + 60 * Math.sin(w * 1.3)),
+      nox: 1 + (i % 50 < 3 ? 12 : 0),
+      battery: Math.round(90 - i / 30),
+    });
+  }
+  devices.set('demo', { id: 'demo', name: 'Go (demo)', rssi: -62, lastSeen: now, latest: history.at(-1), history });
+  selectedId = 'demo';
+  wantScan = true;
+}
+
+// ---- wiring ----
+const demo = location.hash === '#demo';
+if (!demo) loadState();
+buildTiles();
+const supported = demo || checkSupport();
+if (demo) startDemo();
+$('scan').disabled = !supported;
+$('scan').addEventListener('click', () => (wantScan ? stopScan() : startScan()));
+$('device').addEventListener('change', e => { selectedId = e.target.value; saveState(); render(); });
+for (const b of document.querySelectorAll('.seg button')) {
+  b.addEventListener('click', () => { prefs.unit = b.dataset.unit; savePrefs(); render(); });
+}
+$('wake').addEventListener('change', e => { prefs.wake = e.target.checked; savePrefs(); updateWakeLock(); });
+$('clear').addEventListener('click', () => {
+  if (!confirm('Clear the stored readings?')) return;
+  for (const d of devices.values()) d.history = d.latest ? [d.latest] : [];
+  saveState();
+  render();
+});
+setInterval(render, 1000);
+render();
+</script>
+</body>
+</html>

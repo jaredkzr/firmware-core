@@ -208,6 +208,8 @@ partition table, and merged factory-flash binary.
   surface (Peripheral, GPS, Accelerometer, FG Learning arm)
 - [`go_ble_client.md`](go_ble_client.md) — client-side BLE integration spec
   for mobile app developers (discovery, pairing, GATT, payloads, history)
+- [`tools/bthome-viewer/`](tools/bthome-viewer) — phone web page that reads
+  the BTHome broadcast passively (Chrome on Android)
 - [`specs/`](specs) — design specs and refactor plans (temporary; deleted
   once shipped, per [`docs/STYLE.md`](../../docs/STYLE.md))
 - [`tests/`](tests) — host tests (`go_*.tests.cpp`)
