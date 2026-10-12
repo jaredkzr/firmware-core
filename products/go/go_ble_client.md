@@ -62,6 +62,10 @@ The complete local name is placed in the scan response data.
 - The device supports a single concurrent connection. While a client is
   connected, the device stops advertising. Advertising resumes after
   disconnect.
+- The device also sends a non-connectable BTHome v2 sensor broadcast
+  (service data UUID `0xFCD2`) from the same address, including while a client
+  is connected. It carries no data-service UUID or name, so a UUID or name
+  filter ignores it; do not try to connect to it.
 
 ### Connection Parameters
 

@@ -85,6 +85,10 @@ public:
   bool set_manufacturer_data(const uint8_t *data, size_t len) override;
   bool start_advertising() override;
   bool stop_advertising() override;
+#if MYNEWT_VAL(BLE_EXT_ADV)
+  bool set_broadcast_data(const uint8_t *data, size_t len) override;
+  bool stop_broadcast() override;
+#endif
   bool request_conn_params(uint16_t min_interval_ms, uint16_t max_interval_ms, uint16_t latency,
                            uint16_t supervision_timeout_ms) override;
   void set_connect_callback(AgBleConnectCallback callback) override;
@@ -109,6 +113,21 @@ private:
   // and read from app tasks by is_peer_authenticated().
   std::atomic<uint16_t> _conn_handle{BLE_HS_CONN_HANDLE_NONE};
   std::vector<std::unique_ptr<NimbleBleGattService>> _services;
+
+#if MYNEWT_VAL(BLE_EXT_ADV)
+  // Extended-advertising builds run two legacy advertising sets: the
+  // connectable one the setters above build, and the broadcast one. The
+  // connectable payload is assembled here exactly as NimBLEAdvertising lays
+  // it out in legacy builds (flags + UUIDs + manufacturer data, overflowing
+  // to the scan response; name in the scan response), so clients see the
+  // same advertisement either way. Created by init() because the advertisement
+  // constructor reads the stack's address type and TX power.
+  std::unique_ptr<NimBLEExtAdvertisement> _adv_data;
+  std::unique_ptr<NimBLEExtAdvertisement> _scan_response;
+  // False after a setter changed the payload; start_advertising() then
+  // re-applies it to the connectable set before starting it.
+  bool _adv_configured{false};
+#endif
   AgBleConnectCallback _connect_callback;
   AgBleDisconnectCallback _disconnect_callback;
   AgBlePasskeyDisplayCallback _passkey_display_callback;

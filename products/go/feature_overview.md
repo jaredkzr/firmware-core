@@ -161,6 +161,12 @@ Main BLE features:
 Only one phone can be connected at a time. When a phone is connected, the device
 stops advertising until that phone disconnects.
 
+Portable also broadcasts the latest readings (battery, temperature, humidity,
+PM2.5, CO2, TVOC and NOx index) as an unencrypted BTHome v2 advertisement.
+Home Assistant and other BTHome receivers can record them without connecting,
+including during Portable Sleep connect windows and while the phone app is
+connected.
+
 ## Wi-Fi, Local Server, And Cloud Features
 
 In Stationary mode, the Go uses Wi-Fi instead of the Portable BLE data stream.

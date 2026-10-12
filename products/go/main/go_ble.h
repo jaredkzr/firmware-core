@@ -172,6 +172,14 @@ public:
 
   // --- Data output (called by orchestrator in orchestrator task context) ---
 
+  /// Send the BTHome v2 broadcast (go_bthome.h) for the measurement last
+  /// recorded with save_rtc_bthome(), next to the connectable advertisement.
+  /// start_advertising() calls it, so a wake re-broadcasts the previous
+  /// measurement; call it again after recording a new one. No-op when not
+  /// initialized or nothing is recorded. A failure is logged and leaves the
+  /// data service unaffected.
+  void refresh_broadcast();
+
   /// Encode raw measures + GPS as CBOR and update the characteristic value.
   /// Always sets the value for READ access. Additionally sends a notification
   /// when a client is connected. Call on every SensorDataReady regardless of

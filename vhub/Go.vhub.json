@@ -1,6 +1,6 @@
 {
   "schema_version": "1.0",
-  "rev": "fdbd958",
+  "rev": "3e77ee4",
   "product": {
     "slug": "airgradient-go",
     "name": "AirGradient Go",
@@ -602,6 +602,15 @@
       "description": "Portable Sleep deep-sleeps between measurements only while locked with no BLE central, stays connectable through 10-second connect windows, and recovers BLE on unlock",
       "expected_result": "With Portable Sleep Off (default), a locked Portable unit with no phone connected logs no \"entering deep sleep\" for two minutes and keeps advertising. Set Settings > Operations > Portable Sleep: On; BLE Config reads \"port_sleep\": true and the value survives a reboot. Set interval=60, disconnect the app, and lock: within one interval serial logs \"entering deep sleep\" with a timer of at most 10000 ms. During the sleep a BLE scanner sees an AirGradient Go advertisement burst about every 10 to 12 seconds, each lasting about one second, and measurement wakes (\"run_fast_path: entering fast-path boot\") still occur once per interval and advertise throughout. Opening the app while the unit sleeps connects within 15 seconds without a passkey: serial logs \"connect window: promoting to interactive\" or \"fast-path promoting to interactive (button=0 ble=1)\", Home stays locked without a refresh flash, and Measures notifications start within 15 seconds of connecting. From the second timer wake on, Home shows TVOC and NOx index values rather than \"-\". Press Power during a sleep: serial logs \"run_button_wake_path: entering button-wake boot\", Home is painted unlocked from the last values, the unit advertises, and the bonded phone reconnects without a passkey. With the phone connected, let the unit auto-lock and observe for two intervals: no deep-sleep entry occurs and Measures notifications continue. Disconnect the app: deep sleep resumes within one interval. Set Portable Sleep: Off and lock with no phone: no deep-sleep entry for two minutes.",
       "notes": "Use a production V1 with a bonded phone. Capture serial throughout and run a BLE scanner during sleeps; connect-window wakes may be too short for the USB serial port to re-enumerate, so count advertisement bursts in the scanner. Restore Portable Sleep Off and the original interval."
+    },
+    {
+      "id": "portable.ble.bthome-broadcast",
+      "category": "Operating Modes",
+      "sub_category": "Portable BLE",
+      "applies_to": ["V1"],
+      "description": "Portable broadcasts the latest readings as a non-connectable BTHome v2 advertisement that passive scanners decode without connecting",
+      "expected_result": "In Portable with no phone connected, a BLE scanner shows two advertisements from the unit's address: the connectable AirGradient Go <last4> advertisement with the data-service UUID (unchanged), and a non-connectable advertisement carrying service data for UUID 0xFCD2 whose first byte is 0x40 (BTHome v2, unencrypted). Home Assistant's BTHome integration discovers the unit without pairing and shows battery, temperature, humidity, PM2.5, CO2, and two count sensors (TVOC index, then NOx index), each matching Home within one measurement interval, with temperature and humidity after the configured corrections. The packet id byte (after 0x00) increases by one per on-device measurement. With the phone app connected, the BTHome advertisement continues and Home Assistant keeps updating. With Portable Sleep On, interval=60, and the unit locked with no phone, the BTHome advertisement appears in each connect-window burst with the same packet id until the next measurement wake, and Home Assistant keeps updating once per interval. The phone app still discovers, pairs, and reconnects as before. In Offline and Stationary, no BTHome advertisement appears.",
+      "notes": "Use nRF Connect (or similar) for the raw advertisement and a Home Assistant instance with a Bluetooth adapter or ESPHome Bluetooth proxy in range. Record the raw BTHome bytes, the Home Assistant values, and Home side by side. Remove the device from Home Assistant afterward if it should not stay."
     },
     {
       "id": "power.sleep.peripheral-idle",

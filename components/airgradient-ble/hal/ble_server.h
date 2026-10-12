@@ -77,7 +77,7 @@ public:
 //   start() -> [set_passkey_display_callback()] -> [set_auth_complete_callback()]
 //   -> [set_connect_callback()] -> [set_disconnect_callback()] ->
 //   [set_advertising_name()] -> [add_advertised_service_uuid()] ->
-//   [set_manufacturer_data()] -> start_advertising()
+//   [set_manufacturer_data()] -> start_advertising() -> [set_broadcast_data()]
 //
 // ISR-safe: no
 // Thread-safe: no
@@ -148,8 +148,26 @@ public:
     return false;
   }
 
-  // Stops advertising without disconnecting active clients.
+  // Stops advertising without disconnecting active clients. Leaves the
+  // broadcast advertisement (set_broadcast_data()) running.
   virtual bool stop_advertising() = 0;
+
+  // Broadcast advertisement: a second, non-connectable and non-scannable
+  // legacy advertisement sent alongside the connectable one, so passive
+  // scanners can read its payload without connecting. It keeps running while
+  // a client is connected. @p data is the complete AD-structure payload
+  // (at most 31 bytes); a call while broadcasting replaces the payload.
+  // Must be called after init(). Default unsupported (returns false) so
+  // servers built without multi-advertising, and test doubles, need not
+  // implement it.
+  virtual bool set_broadcast_data(const uint8_t *data, size_t len) {
+    (void)data;
+    (void)len;
+    return false;
+  }
+
+  // Stops the broadcast advertisement. Returns false when unsupported.
+  virtual bool stop_broadcast() { return false; }
 
   // Registers a callback invoked when a client connects. Stored by value.
   // Must be set before start_advertising() to guarantee delivery of all

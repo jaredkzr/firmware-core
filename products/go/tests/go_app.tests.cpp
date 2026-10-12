@@ -16,6 +16,7 @@
 
 #include "go_app.h"
 #include "go_board.h"
+#include "go_bthome.h"
 #include "go_events.h"
 #include "go_local_api.h"
 #include "buzzer/go_buzzer.h"
@@ -103,6 +104,7 @@ extern bool portable_ble_start_result;
 extern int portable_ble_start_count;
 extern bool ble_connected;
 extern int ble_deinit_count;
+extern int ble_refresh_broadcast_count;
 extern bool should_hold_pm_result;
 extern bool shutdown_called;
 extern bool power_on_reset;
@@ -1335,6 +1337,40 @@ TEST_CASE("execute_fast_path: Portable Sleep advertises and sleeps in connect wi
   CHECK(result.ble_windows);
   CHECK(test_spy::ble_deinit_count == 1); // released before deep sleep
   CHECK_FALSE(test_spy::last_decide_sleep_ble_link);
+}
+
+TEST_CASE("execute_fast_path: records the BTHome broadcast and refreshes it while advertising") {
+  test_spy::reset();
+  clear_rtc_bthome();
+  test_spy::sleep_decision_to_return = {PowerService::SleepType::Deep, 47000, true};
+  test_spy::measures_to_return.co2.co2 = 640;
+  test_spy::snapshot_to_return.battery_percentage = 71.0f;
+
+  MockBoard board;
+  GoApp app(board);
+  GoAppTestAccess access(app);
+  RtcAppState state{};
+  state.mode = OperatingMode::Portable;
+  volatile bool button = false;
+
+  SECTION("Portable Sleep: the advertising boot sends it") {
+    test_spy::portable_ble_start_result = true;
+    board.settings.portable_sleep_enabled = true;
+    (void)access.execute_fast_path(state, button);
+    CHECK(test_spy::ble_refresh_broadcast_count == 1);
+  }
+  SECTION("BLE down: recorded for the next boot that advertises") {
+    (void)access.execute_fast_path(state, button);
+    CHECK(test_spy::ble_refresh_broadcast_count == 0);
+  }
+
+  BthomeReadings readings{};
+  uint8_t packet_id = 0xFF;
+  REQUIRE(load_rtc_bthome(readings, packet_id));
+  CHECK(packet_id == 0);
+  CHECK(readings.co2_ppm == 640);
+  CHECK(readings.battery_pct == 71.0f);
+  clear_rtc_bthome();
 }
 
 TEST_CASE("execute_fast_path: BLE stays off outside Portable Sleep") {

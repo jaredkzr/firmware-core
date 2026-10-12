@@ -8,6 +8,7 @@
 
 #include "go_ble.h"
 #include "go_ble_protocol.h"
+#include "go_bthome.h"
 #include "go_storage.h"
 #include "hal/ble_server.h"
 
@@ -97,6 +98,12 @@ public:
     return true;
   }
 
+  bool set_broadcast_data(const uint8_t *data, size_t len) override {
+    broadcast_count++;
+    broadcast_data.assign(data, data + len);
+    return broadcast_result;
+  }
+
   void set_connect_callback(AgBleConnectCallback /*cb*/) override {}
   void set_disconnect_callback(AgBleDisconnectCallback /*cb*/) override {}
   void set_passkey_display_callback(AgBlePasskeyDisplayCallback /*cb*/) override {}
@@ -109,6 +116,9 @@ public:
   int delete_all_bonds_count = 0;
   bool delete_all_bonds_result = true;
   bool peer_authenticated = false;
+  int broadcast_count = 0;
+  std::vector<uint8_t> broadcast_data;
+  bool broadcast_result = true;
 
   void reset() {
     start_advertising_count = 0;
@@ -245,6 +255,9 @@ public:
   static void set_history_char(BleService &svc, AgBleCharacteristic *c) { svc._history_char = c; }
   static void set_export_active(BleService &svc, bool active) { svc._export_active = active; }
   static void set_export_session_id(BleService &svc, uint32_t id) { svc._export_session_id = id; }
+  static void set_initialized(BleService &svc, bool initialized) {
+    svc._initialized = initialized;
+  }
 
   // --- Private method access ---
   static void on_connect(BleService &svc, uint16_t h) { svc.on_connect(h); }
@@ -2946,4 +2959,52 @@ TEST_CASE("BLE: compute_ble_adv_name uses the serial tail") {
   CHECK(std::string(name) == "AirGradient Go 0000");
   compute_ble_adv_name(nullptr, name, sizeof(name));
   CHECK(std::string(name) == "AirGradient Go 0000");
+}
+
+// ===========================================================================
+// BTHome broadcast
+// ===========================================================================
+
+TEST_CASE("BLE: refresh_broadcast sends the recorded BTHome measurement") {
+  StorageService storage(*null_cache_ptr, *null_nand_ptr);
+  BleService svc(nullptr, storage, default_ble_server);
+  MockBleServer server;
+  BleServiceTestAccess::set_server(svc, &server);
+  BleServiceTestAccess::set_initialized(svc, true);
+
+  BthomeReadings readings{};
+  readings.co2_ppm = 615;
+  clear_rtc_bthome();
+  save_rtc_bthome(readings);
+  save_rtc_bthome(readings); // packet id 1
+
+  svc.refresh_broadcast();
+  REQUIRE(server.broadcast_count == 1);
+  uint8_t expected[BTHOME_ADV_MAX_LEN];
+  const size_t len = encode_bthome_adv(readings, 1, expected, sizeof(expected));
+  CHECK(server.broadcast_data == std::vector<uint8_t>(expected, expected + len));
+
+  // A failed broadcast is logged only and leaves the data service alone.
+  server.broadcast_result = false;
+  svc.refresh_broadcast();
+  CHECK(server.broadcast_count == 2);
+  CHECK(server.start_advertising_count == 0);
+  clear_rtc_bthome();
+}
+
+TEST_CASE("BLE: refresh_broadcast needs a recording and an initialized service") {
+  StorageService storage(*null_cache_ptr, *null_nand_ptr);
+  BleService svc(nullptr, storage, default_ble_server);
+  MockBleServer server;
+  BleServiceTestAccess::set_server(svc, &server);
+
+  clear_rtc_bthome();
+  save_rtc_bthome(BthomeReadings{});
+  svc.refresh_broadcast(); // not initialized
+  CHECK(server.broadcast_count == 0);
+
+  BleServiceTestAccess::set_initialized(svc, true);
+  clear_rtc_bthome();
+  svc.refresh_broadcast(); // nothing recorded
+  CHECK(server.broadcast_count == 0);
 }

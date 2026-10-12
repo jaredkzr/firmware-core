@@ -16,6 +16,8 @@ This component owns:
 - GATT service and characteristic registration
 - BLE advertising control (local name, advertised service UUIDs,
   manufacturer-specific data)
+- an optional non-connectable broadcast advertisement next to the connectable
+  one (extended-advertising builds)
 - connect / disconnect event delivery via callbacks
 - per-characteristic write event delivery via callbacks
 - characteristic value updates and notifications to connected clients
@@ -185,3 +187,29 @@ under `products/go/tests/ble-integration/`.
 The HAL exposes the most common advertising payload fields — local name,
 one or more service UUIDs, and optional manufacturer-specific data. All
 must be set after `init()` and before `start_advertising()`.
+
+### Broadcast Advertisement
+
+`set_broadcast_data(data, len)` sends a caller-built AD payload (at most 31
+bytes) as a second, non-connectable and non-scannable legacy advertisement,
+for data that passive scanners read without connecting (the Go uses it for a
+BTHome v2 sensor broadcast). A later call replaces the payload. It runs
+independently of the connectable advertisement: `stop_advertising()` and a
+client connection leave it running; `stop_broadcast()` or `deinit()` stop it.
+
+The broadcast needs two advertising sets, so it is only available when the
+product enables NimBLE extended advertising:
+
+```text
+CONFIG_BT_NIMBLE_EXT_ADV=y
+CONFIG_BT_NIMBLE_MAX_EXT_ADV_INSTANCES=1
+CONFIG_BT_NIMBLE_EXT_ADV_MAX_SIZE=31
+```
+
+The driver then builds the connectable advertisement as advertising set 0 with
+the same legacy PDU, flags, interval, and payload layout as legacy builds
+(flags, UUIDs, and manufacturer data in the advertisement, overflowing to the
+scan response; name in the scan response), so clients see no difference. The
+broadcast is set 1 at the NimBLE default non-connectable interval. Without
+extended advertising (for example the reference product), `set_broadcast_data()`
+returns `false` and the server behaves as before.
