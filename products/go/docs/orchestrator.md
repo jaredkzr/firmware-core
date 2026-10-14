@@ -653,7 +653,10 @@ Unified shutdown pipeline for all shutdown paths. Takes an optional
 EDV and high- or low-battery-temperature safety trips are detected by
 `poll_bms()` and signalled via `PowerSnapshot::ship_mode_request`. Invalid NTC
 disables charging but does not create a ship-mode request. The orchestrator
-checks the request in `on_bms_timer()` and routes to `shutdown(reason)`. The
+checks the request after its boot poll in `init()` and in `on_bms_timer()`,
+and routes to `shutdown(reason)`. Deep-sleep fast-path wakes (Offline,
+Portable Sleep) never reach the orchestrator, so `GoApp::execute_fast_path()`
+paints the reason screen and powers off itself. The
 `disc` notice is the safety/user-shutdown counterpart of the leave-Portable
 notice in [`change_mode()`](#change_mode).
 

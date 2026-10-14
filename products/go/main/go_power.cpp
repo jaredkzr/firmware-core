@@ -111,6 +111,11 @@ RTC_DATA_ATTR static bool s_rtc_state_valid = false;
 // Retained-clock time the next measurement is due during a Portable Sleep
 // cycle split into connect windows; 0 when the current sleep is not split.
 RTC_DATA_ATTR static uint64_t s_rtc_measure_due_ms = 0;
+// Consecutive on-battery polls below EDV_SHIP_THRESHOLD_V. Deep-sleep wakes
+// (Portable Sleep, Offline) build a new PowerService and poll once each, so a
+// member counter would never reach the debounce count. Ship mode cuts power,
+// which clears it.
+RTC_DATA_ATTR static uint8_t s_rtc_edv_low_count = 0;
 
 // ---------------------------------------------------------------------------
 // Construction
@@ -228,16 +233,32 @@ PowerSnapshot PowerService::poll_bms(bool pm_invalid_hint) {
     const bool on_battery = status_ok && (bms_status.power_source == BmsPowerSource::None ||
                                           bms_status.power_source == BmsPowerSource::OtgMode);
 
-    if (on_battery && telemetry_ok && telemetry.is_battery_voltage_valid() &&
-        telemetry.battery_voltage < EDV_SHIP_THRESHOLD_V) {
-      ++_edv_low_count;
-    } else {
-      _edv_low_count = 0;
+    // Charger ADC first; the gauge's own cell voltage covers a failed or
+    // not-yet-converted charger reading.
+    float cell_v = BmsInvalid::VOLT;
+    if (telemetry_ok && telemetry.is_battery_voltage_valid()) {
+      cell_v = telemetry.battery_voltage;
+    } else if (status.fg_voltage_mv != BmsInvalid::VOLTAGE_MV) {
+      cell_v = static_cast<float>(status.fg_voltage_mv) / MV_PER_V;
     }
+    const bool cell_v_valid = cell_v >= BmsRange::MIN_VALID_VOLT;
 
-    if (_edv_low_count >= EDV_SHIP_DEBOUNCE_SAMPLES) {
-      AG_LOGW(TAG, "EDV trip: cell %.2fV < %.1fV for %d polls -> requesting ship mode",
-              telemetry.battery_voltage, EDV_SHIP_THRESHOLD_V, _edv_low_count);
+    if (on_battery && cell_v_valid) {
+      if (cell_v < EDV_SHIP_THRESHOLD_V) {
+        if (s_rtc_edv_low_count < UINT8_MAX) {
+          ++s_rtc_edv_low_count;
+        }
+      } else {
+        s_rtc_edv_low_count = 0;
+      }
+    } else if (status_ok && !on_battery) {
+      s_rtc_edv_low_count = 0; // external power holds the cell up
+    }
+    // An unreadable source or voltage neither advances nor clears the count.
+
+    if (s_rtc_edv_low_count >= EDV_SHIP_DEBOUNCE_SAMPLES) {
+      AG_LOGW(TAG, "EDV trip: cell %.2fV < %.1fV for %d polls -> requesting ship mode", cell_v,
+              EDV_SHIP_THRESHOLD_V, static_cast<int>(s_rtc_edv_low_count));
       status.ship_mode_request = ShipModeRequest::OverDischarge;
     }
   }
@@ -865,6 +886,11 @@ RtcAppState load_rtc_app_state() {
   return out;
 }
 
+bool PowerService::edv_confirmation_pending() {
+  return s_rtc_edv_low_count > 0 && s_rtc_edv_low_count < EDV_SHIP_DEBOUNCE_SAMPLES;
+}
+
 #ifdef TEST_HOST
 void invalidate_rtc_app_state_for_test() { s_rtc_state_valid = false; }
+void reset_rtc_edv_state_for_test() { s_rtc_edv_low_count = 0; }
 #endif

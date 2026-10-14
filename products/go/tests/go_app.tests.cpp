@@ -96,6 +96,10 @@ extern int bms_poll_count;
 extern bool state_saved;
 extern RtcAppState last_saved_state;
 extern PowerSnapshot snapshot_to_return;
+/// poll_bms() returns these in order, then snapshot_to_return.
+extern std::vector<PowerSnapshot> snapshot_sequence;
+/// edv_confirmation_pending() holds until bms_poll_count reaches this.
+extern int edv_pending_until_poll;
 extern PowerService::SleepDecision sleep_decision_to_return;
 extern bool enter_sleep_called;
 extern uint32_t enter_sleep_duration_ms;
@@ -1501,7 +1505,7 @@ TEST_CASE("run_ble_window_path: BLE failure still sleeps") {
   CHECK_FALSE(test_spy::orchestrator_init_called);
 }
 
-TEST_CASE("Offline fast path: temperature trip paints shutdown screen and shuts down") {
+TEST_CASE("Offline fast path: safety trip paints shutdown screen and shuts down") {
   const auto run_trip = [](ShipModeRequest request, Screen expected_screen) {
     test_spy::reset();
     test_spy::snapshot_to_return.ship_mode_request = request;
@@ -1532,6 +1536,55 @@ TEST_CASE("Offline fast path: temperature trip paints shutdown screen and shuts 
   SECTION("under-temperature uses the low-temperature page") {
     run_trip(ShipModeRequest::UnderTemperature, Screen::ShutdownTemperatureLow);
   }
+
+  SECTION("over-discharge uses the critically-low page") {
+    run_trip(ShipModeRequest::OverDischarge, Screen::ShutdownDischarge);
+  }
+}
+
+TEST_CASE("Portable Sleep fast path: a low cell is confirmed and shut down within one wake") {
+  test_spy::reset();
+  PowerSnapshot low{};
+  low.battery_percentage = 1.0f;
+  PowerSnapshot tripped = low;
+  tripped.ship_mode_request = ShipModeRequest::OverDischarge;
+  test_spy::snapshot_sequence = {low, low, tripped};
+  test_spy::edv_pending_until_poll = PowerService::EDV_SHIP_DEBOUNCE_SAMPLES;
+
+  MockBoard board;
+  GoApp app(board);
+  GoAppTestAccess access(app);
+  RtcAppState state{};
+  state.mode = OperatingMode::Portable;
+  state.lock_state = LockState::Locked;
+  state.set_flag(RtcAppFlag::SensorsWarm, true);
+
+  access.run_fast_path(state);
+
+  CHECK(test_spy::bms_poll_count == PowerService::EDV_SHIP_DEBOUNCE_SAMPLES);
+  CHECK(test_spy::shutdown_called);
+  CHECK(DisplayService::spy_last_screen == Screen::ShutdownDischarge);
+  CHECK_FALSE(test_spy::enter_sleep_called);
+}
+
+TEST_CASE("Portable Sleep fast path: EDV confirmation polls are bounded") {
+  test_spy::reset();
+  // Confirmation never resolves (e.g. unreadable cell voltage).
+  test_spy::edv_pending_until_poll = 1000;
+
+  MockBoard board;
+  GoApp app(board);
+  GoAppTestAccess access(app);
+  RtcAppState state{};
+  state.mode = OperatingMode::Portable;
+  state.lock_state = LockState::Locked;
+  state.set_flag(RtcAppFlag::SensorsWarm, true);
+  volatile bool button = false;
+
+  const auto result = access.execute_fast_path(state, button);
+
+  CHECK(test_spy::bms_poll_count == PowerService::EDV_SHIP_DEBOUNCE_SAMPLES);
+  CHECK(result.outcome != GoAppTestAccess::Outcome::Shutdown);
 }
 
 TEST_CASE("execute_fast_path: button during warmup -> promote unlocked") {

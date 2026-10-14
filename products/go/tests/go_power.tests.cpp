@@ -1347,6 +1347,7 @@ TEST_CASE("recover_pm_sensor: EN_PM off -> boost off -> boost on -> EN_PM on",
   REQUIRE_CALL(mock, read_status(trompeloeil::_)).SIDE_EFFECT(_1.power_source = source).RETURN(true)
 
 TEST_CASE("poll_bms: EDV over-discharge trip", "[PowerService][edv]") {
+  reset_rtc_edv_state_for_test();
   MockBmsDevice mock_bms;
   PowerService svc(&mock_bms, test_gpio_hal, DEFAULT_CONFIG);
 
@@ -1510,6 +1511,97 @@ TEST_CASE("poll_bms: EDV over-discharge trip", "[PowerService][edv]") {
       CHECK(snap.ship_mode_request == ShipModeRequest::None);
     }
   }
+}
+
+TEST_CASE("poll_bms: EDV debounce spans deep-sleep wakes", "[PowerService][edv]") {
+  reset_rtc_edv_state_for_test();
+  MockBmsDevice mock_bms;
+  ALLOW_CALL(mock_bms, get_battery_percentage(trompeloeil::_)).SIDE_EFFECT(*_1 = 1.0f).RETURN(true);
+
+  // Each wake builds a fresh PowerService and polls once.
+  const auto wake_poll = [&mock_bms](float voltage, BmsPowerSource source) {
+    PowerService svc(&mock_bms, test_gpio_hal, DEFAULT_CONFIG);
+    POLL_BMS_CYCLE(mock_bms, voltage, source);
+    return svc.poll_bms();
+  };
+
+  SECTION("one low poll per wake trips on the third wake") {
+    CHECK(wake_poll(2.8f, BmsPowerSource::None).ship_mode_request == ShipModeRequest::None);
+    CHECK(PowerService::edv_confirmation_pending());
+    CHECK(wake_poll(2.8f, BmsPowerSource::None).ship_mode_request == ShipModeRequest::None);
+    CHECK(wake_poll(2.8f, BmsPowerSource::None).ship_mode_request ==
+          ShipModeRequest::OverDischarge);
+    CHECK_FALSE(PowerService::edv_confirmation_pending());
+  }
+
+  SECTION("a healthy reading on a later wake clears the count") {
+    wake_poll(2.8f, BmsPowerSource::None);
+    wake_poll(2.8f, BmsPowerSource::None);
+    wake_poll(3.4f, BmsPowerSource::None);
+    CHECK_FALSE(PowerService::edv_confirmation_pending());
+    CHECK(wake_poll(2.8f, BmsPowerSource::None).ship_mode_request == ShipModeRequest::None);
+  }
+
+  SECTION("external power clears the count") {
+    wake_poll(2.8f, BmsPowerSource::None);
+    wake_poll(2.8f, BmsPowerSource::None);
+    wake_poll(2.8f, BmsPowerSource::UsbSdp);
+    CHECK_FALSE(PowerService::edv_confirmation_pending());
+  }
+}
+
+TEST_CASE("poll_bms: EDV unreadable polls hold the count", "[PowerService][edv]") {
+  reset_rtc_edv_state_for_test();
+  MockBmsDevice mock_bms;
+  PowerService svc(&mock_bms, test_gpio_hal, DEFAULT_CONFIG);
+  ALLOW_CALL(mock_bms, get_battery_percentage(trompeloeil::_)).SIDE_EFFECT(*_1 = 1.0f).RETURN(true);
+
+  {
+    POLL_BMS_CYCLE(mock_bms, 2.8f, BmsPowerSource::None);
+    svc.poll_bms();
+  }
+  {
+    POLL_BMS_CYCLE(mock_bms, 2.8f, BmsPowerSource::None);
+    svc.poll_bms();
+  }
+  {
+    POLL_BMS_CYCLE_STATUS_FAIL(mock_bms, 2.8f);
+    CHECK(svc.poll_bms().ship_mode_request == ShipModeRequest::None);
+  }
+  CHECK(PowerService::edv_confirmation_pending());
+  {
+    POLL_BMS_CYCLE(mock_bms, 2.8f, BmsPowerSource::None);
+    CHECK(svc.poll_bms().ship_mode_request == ShipModeRequest::OverDischarge);
+  }
+}
+
+TEST_CASE("poll_bms: EDV falls back to the gauge's cell voltage", "[PowerService][edv][fg]") {
+  reset_rtc_edv_state_for_test();
+  MockBmsDevice mock_bms;
+  MockFuelGaugeDevice mock_fg;
+  PowerService svc(&mock_bms, test_gpio_hal, DEFAULT_CONFIG);
+  svc.set_fuel_gauge(&mock_fg);
+
+  ALLOW_CALL(mock_fg, ready()).RETURN(true);
+  ALLOW_CALL(mock_fg, read_soc_percent(trompeloeil::_)).SIDE_EFFECT(_1 = 1).RETURN(true);
+  ALLOW_CALL(mock_fg, read_voltage_mv(trompeloeil::_)).SIDE_EFFECT(_1 = 2850).RETURN(true);
+  ALLOW_CALL(mock_fg, read_average_current_ma(trompeloeil::_)).RETURN(false);
+  ALLOW_CALL(mock_fg, read_average_power_mw(trompeloeil::_)).RETURN(false);
+  ALLOW_CALL(mock_fg, read_remaining_capacity_mah(trompeloeil::_)).RETURN(false);
+  ALLOW_CALL(mock_fg, read_full_charge_capacity_mah(trompeloeil::_)).RETURN(false);
+  ALLOW_CALL(mock_fg, read_internal_temperature_c(trompeloeil::_)).RETURN(false);
+  ALLOW_CALL(mock_fg, read_flags(trompeloeil::_)).RETURN(false);
+  // Charger telemetry fails; its status still says on battery.
+  ALLOW_CALL(mock_bms, read_telemetry(trompeloeil::_)).RETURN(false);
+  ALLOW_CALL(mock_bms, read_status(trompeloeil::_))
+      .SIDE_EFFECT(_1.power_source = BmsPowerSource::None)
+      .RETURN(true);
+
+  PowerSnapshot snap;
+  for (int i = 0; i < PowerService::EDV_SHIP_DEBOUNCE_SAMPLES; ++i) {
+    snap = svc.poll_bms();
+  }
+  CHECK(snap.ship_mode_request == ShipModeRequest::OverDischarge);
 }
 
 // ============================================================================
@@ -2400,6 +2492,7 @@ TEST_CASE("poll_bms_fg_learning: external_input_present mirrors plug state",
 
 TEST_CASE("poll_bms_fg_learning: edv_cutoff_reached mirrors over-discharge ship request",
           "[PowerService][fg][learning][edv]") {
+  reset_rtc_edv_state_for_test();
   MockBmsDevice mock_bms;
   PowerService svc(&mock_bms, test_gpio_hal, DEFAULT_CONFIG);
 
