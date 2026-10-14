@@ -411,7 +411,11 @@ frame, lights the result LED (green / red), and holds until the POWER press.
   so OCV1 is still captured at the relaxed top.
 - **Chemistry already correct:** `set_chemistry_4v2()` reads the Chem ID first
   and only writes when it differs — changing chemistry resets IT learning, so it
-  must never run on an already-learned unit.
+  must never run on an already-learned unit. Every V1 boot also enforces the
+  4.2 V profile in `init_fuel_gauge()` (see
+  [`hardware_init.md`](hardware_init.md#fuel-gauge-bring-up-v1-only)), so a unit
+  that never ran learning, or whose gauge lost power, is switched there; run
+  learning afterwards to relearn Qmax and Ra.
 - **No fuel gauge attached (Prototype):** the gauge prerequisites and verify read
   return false; a Prototype board has no learning surface and never arms a run.
 - **Invalid gauge data:** the dashboard renders `FG: NO DATA` when the SOC

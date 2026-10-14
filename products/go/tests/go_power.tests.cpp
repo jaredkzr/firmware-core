@@ -1734,6 +1734,17 @@ TEST_CASE("set_watchdog_timeout_ms: PowerService wrapper", "[PowerService][watch
   }
 }
 
+TEST_CASE("fg_needs_chemistry_switch: only a known other profile switches", "[fg][chem]") {
+  constexpr uint16_t TARGET = FgChemId::CHEM_4V2;
+  CHECK(fg_needs_chemistry_switch(FgChemId::CHEM_4V35, true, TARGET));
+  CHECK(fg_needs_chemistry_switch(FgChemId::CHEM_4V4, true, TARGET));
+  CHECK_FALSE(fg_needs_chemistry_switch(FgChemId::CHEM_4V2, true, TARGET));
+  // A failed or garbled read must never trigger the learning-resetting switch.
+  CHECK_FALSE(fg_needs_chemistry_switch(FgChemId::CHEM_4V35, false, TARGET));
+  CHECK_FALSE(fg_needs_chemistry_switch(0x0000, true, TARGET));
+  CHECK_FALSE(fg_needs_chemistry_switch(0xFFFF, true, TARGET));
+}
+
 // ============================================================================
 // TEST CASE 12 — evaluate_fg_state truth table
 // ============================================================================

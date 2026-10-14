@@ -252,6 +252,22 @@ void GoHardwareBoard::init_fuel_gauge() {
       AG_LOGE(TAG, "BQ27427 init failed — FG offline");
       // Continue: _fuel_gauge stays non-null but ready() == false.
     } else {
+      // The charger stops at 4.2 V (init_bms), so the gauge needs the 4.2 V
+      // profile. The chip ships on, and after a gauge POR returns to, the
+      // 4.35 V profile; the factory learning path was the only place that
+      // switched it. Done before the cell-config check so any field the
+      // switch touches is rewritten below.
+      uint16_t chem = 0;
+      const bool chem_ok = _fuel_gauge->read_chem_id(chem);
+      if (fg_needs_chemistry_switch(chem, chem_ok, BQ27427::CHEM_ID_4V2)) {
+        AG_LOGW(TAG, "BQ27427 chemistry 0x%04X does not match the 4.2 V charger", chem);
+        if (!_fuel_gauge->select_chemistry_4v2()) {
+          AG_LOGE(TAG, "BQ27427 chemistry switch failed");
+        }
+      } else if (!chem_ok) {
+        AG_LOGW(TAG, "BQ27427 chemistry unreadable — left as-is");
+      }
+
       // Pass 1: read state with validity flags.
       uint16_t dc = 0;
       uint16_t fcc = 0;

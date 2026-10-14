@@ -254,6 +254,14 @@ inline bool operator==(const FgCellConfig &a, const FgCellConfig &b) {
 
 inline bool operator!=(const FgCellConfig &a, const FgCellConfig &b) { return !(a == b); }
 
+/// BQ27427 Chem IDs (TI labels are hex: "1202" == 0x1202). The chip ships on
+/// the 4.35 V profile and falls back to it after a gauge power-on reset.
+namespace FgChemId {
+static constexpr uint16_t CHEM_4V35 = 0x3230; ///< ROM default
+static constexpr uint16_t CHEM_4V2 = 0x1202;
+static constexpr uint16_t CHEM_4V4 = 0x3142;
+} // namespace FgChemId
+
 // ---------------------------------------------------------------------------
 // FgFlags — BQ27427 Flags() register bit definitions (TRM SLUUCD5 §5.1)
 // ---------------------------------------------------------------------------
