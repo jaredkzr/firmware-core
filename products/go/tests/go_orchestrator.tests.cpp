@@ -947,8 +947,22 @@ TEST_CASE("init(PowerOn): default state with first measurement and BMS poll",
   REQUIRE(test_spy::bms_polled);
 }
 
-TEST_CASE("init: temperature trip shuts down before interactive operation",
-          "[Orchestrator][init][temperature]") {
+TEST_CASE("init: safety trip shuts down before interactive operation",
+          "[Orchestrator][init][temperature][edv]") {
+  SECTION("over-discharge uses the critically-low page") {
+    TestFixture f;
+    auto orch = f.make_orchestrator();
+    test_spy::snapshot_to_return.ship_mode_request = ShipModeRequest::OverDischarge;
+    f.ui_manager.show_info(BOOT_SPLASH_TEXT);
+
+    orch.init(WakeCause::Timer);
+
+    CHECK(test_spy::shutdown_called);
+    CHECK(f.ui_manager.current_screen() == Screen::ShutdownDischarge);
+    CHECK_FALSE(test_spy::ble_init_called);
+    CHECK_FALSE(A::setup_session_active(orch));
+  }
+
   SECTION("over-temperature uses the overheated page") {
     TestFixture f;
     auto orch = f.make_orchestrator();

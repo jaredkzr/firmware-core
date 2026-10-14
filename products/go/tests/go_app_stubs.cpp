@@ -29,6 +29,7 @@
 #include <cstring>
 #include <functional>
 #include <string>
+#include <vector>
 
 // ============================================================================
 // test_spy — observable state written by stubs, read by test assertions
@@ -88,6 +89,8 @@ int bms_poll_count = 0;
 bool state_saved = false;
 RtcAppState last_saved_state{};
 PowerSnapshot snapshot_to_return{};
+std::vector<PowerSnapshot> snapshot_sequence;
+int edv_pending_until_poll = 0;
 PowerService::SleepDecision sleep_decision_to_return = {PowerService::SleepType::Deep, 60000};
 OperatingMode last_decide_sleep_mode = OperatingMode::Stationary;
 bool last_decide_sleep_ble_link = true;
@@ -199,6 +202,8 @@ void reset() {
   state_saved = false;
   last_saved_state = RtcAppState{};
   snapshot_to_return = PowerSnapshot{};
+  snapshot_sequence.clear();
+  edv_pending_until_poll = 0;
   sleep_decision_to_return = {PowerService::SleepType::Deep, 60000};
   last_decide_sleep_mode = OperatingMode::Stationary;
   last_decide_sleep_ble_link = true;
@@ -550,7 +555,15 @@ void PowerService::set_fuel_gauge(FuelGaugeDevice * /*fg*/) {}
 PowerSnapshot PowerService::poll_bms(bool /*pm_invalid_hint*/) {
   test_spy::bms_polled = true;
   ++test_spy::bms_poll_count;
+  const auto index = static_cast<size_t>(test_spy::bms_poll_count - 1);
+  if (index < test_spy::snapshot_sequence.size()) {
+    return test_spy::snapshot_sequence[index];
+  }
   return test_spy::snapshot_to_return;
+}
+
+bool PowerService::edv_confirmation_pending() {
+  return test_spy::bms_poll_count < test_spy::edv_pending_until_poll;
 }
 
 bool PowerService::poll_charging_status(BmsChargingState &state) {

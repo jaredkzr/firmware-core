@@ -296,8 +296,8 @@ void Orchestrator::init(WakeCause cause, const BootHandoff &handoff) {
 
   _latest_power =
       _svc.power_service.poll_bms(_first_measurement_done && !_raw_measures.pm_a.is_pm_25_valid());
-  if (_latest_power.ship_mode_request == ShipModeRequest::OverTemperature ||
-      _latest_power.ship_mode_request == ShipModeRequest::UnderTemperature) {
+  // The EDV count is carried across deep sleep, so a low cell can trip here.
+  if (_latest_power.ship_mode_request != ShipModeRequest::None) {
     shutdown(_latest_power.ship_mode_request);
     return;
   }

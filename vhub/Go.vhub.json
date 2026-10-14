@@ -1,6 +1,6 @@
 {
   "schema_version": "1.0",
-  "rev": "3e77ee4",
+  "rev": "ae0d11b",
   "product": {
     "slug": "airgradient-go",
     "name": "AirGradient Go",
@@ -665,6 +665,15 @@
       "description": "User shutdown on USB enters charging-only mode without waiting for a watchdog reset",
       "expected_result": "Hold Power until Powered off appears, then release it. Charging or Battery Full appears within 10 seconds without Getting Ready or Home. The page remains in charging-only mode for five minutes without rebooting. Pressing and releasing Power starts normal operation and reaches Home. Settings and the recorded completed route remain unchanged. Repeat shutdown on USB, then unplug from the charging page: Powered off appears and the unit stays off.",
       "notes": "Start on Home with USB connected. Record settings and one completed route before testing. Release Power after Powered off appears; keeping it held delays the reboot. Repeat with a full battery. If collecting serial, expect shutdown: rebooting into charging-only mode. Battery-only and protective shutdowns retain their existing behavior."
+    },
+    {
+      "id": "power.shutdown.over-discharge",
+      "category": "Power Management",
+      "sub_category": "Safety trips",
+      "applies_to": ["V1"],
+      "description": "A cell below 2.9 V powers the unit off into ship mode from every path, including Portable Sleep and Offline deep-sleep wakes",
+      "expected_result": "With the battery replaced by a bench supply at 3.40 V and USB unplugged, set Portable Sleep: On, interval=60, no phone connected, and lock. Lower the supply to 2.85 V while the unit sleeps. On the next measurement wake serial logs \"EDV trip: cell 2.8…V < 2.9V for 3 polls -> requesting ship mode\" within that wake (three poll_bms lines about 200 ms apart, not one per interval), the display shows the critically-low page (\"Battery critically low\", \"Connect charger\"), and the unit enters ship mode: supply current drops to the ship-mode level and no advertisement bursts or wakes occur for two minutes. Raise the supply to 3.40 V and press Power: the unit cold-boots normally. Repeat in Offline mode with the same result. Repeat unlocked in Portable mode with Portable Sleep Off and a phone connected: the trip fires within three BMS polls (about 90 seconds) and BLE Status notifies disc=low_batt before the link drops. Hold the supply at 2.85 V and press Power: the unit boots, then shuts down again with the same page within about 90 seconds. With USB plugged in at 2.85 V, no trip occurs.",
+      "notes": "Requires a current-limited bench supply wired in place of the cell (observe connector polarity) and serial capture across wakes. A dip that recovers above 2.9 V before the third consecutive reading must not trip. Restore Portable Sleep, mode and interval afterward."
     },
     {
       "id": "manufacturing.usb-serial.command-protocol",

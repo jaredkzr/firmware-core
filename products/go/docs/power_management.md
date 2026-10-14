@@ -15,8 +15,14 @@ For AGo, the power service also manages:
   below for the cell-OCP rationale
 - **EDV (over-discharge) trip:** requests ship mode
   (`ShipModeRequest::OverDischarge`) when cell voltage stays below 2.9 V
-  for 3 consecutive polls while on battery. The orchestrator shows a
-  warning on `Screen::Info` then calls `shutdown()`
+  for 3 consecutive polls while on battery. The voltage comes from the
+  charger ADC, or from the fuel gauge when the charger reading is invalid.
+  The count lives in RTC memory, so it spans deep-sleep wakes, and a poll
+  that can't read the voltage or power source holds it. A deep-sleep fast
+  path wake that sees a low cell polls again every
+  `EDV_CONFIRM_INTERVAL_MS` (at most 3 polls per wake), so it trips within
+  that wake. The fast path, the orchestrator's boot poll and its BMS timer
+  all act on the request: the reason screen, then `shutdown()`
 - **Battery-temperature protection:** charging is allowed from 0 °C through
   45 °C. After a temperature or invalid-NTC block, charging resumes only from
   2 °C through 43 °C. Discharging is allowed from -10 °C through 60 °C;

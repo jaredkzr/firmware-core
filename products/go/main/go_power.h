@@ -243,6 +243,13 @@ public:
   ///   call sites that don't track PM validity.
   PowerSnapshot poll_bms(bool pm_invalid_hint = false);
 
+  /// True while on-battery polls have seen the cell below EDV_SHIP_THRESHOLD_V
+  /// but fewer than EDV_SHIP_DEBOUNCE_SAMPLES times in a row. A deep-sleep
+  /// wake polls again (EDV_CONFIRM_INTERVAL_MS apart) while this holds, so a
+  /// low cell trips within one wake instead of over several measurement
+  /// intervals.
+  static bool edv_confirmation_pending();
+
   /// Factory-learning poll: a normal poll_bms() plus the learning-only fields
   /// (packed fg_learning_flags incl. the extra CONTROL_STATUS read,
   /// external_input_present, edv_cutoff_reached). Used only by the factory
@@ -467,6 +474,10 @@ public:
   // --- EDV (over-discharge) thresholds ---
   static constexpr float EDV_SHIP_THRESHOLD_V = 2.9f;
   static constexpr int EDV_SHIP_DEBOUNCE_SAMPLES = 3;
+  /// Spacing of the extra polls a deep-sleep wake takes to confirm a low cell
+  /// within the same wake (see edv_confirmation_pending()).
+  static constexpr uint32_t EDV_CONFIRM_INTERVAL_MS = 200;
+  static constexpr float MV_PER_V = 1000.0f;
 
   // --- Battery temperature thresholds ---
   static constexpr int16_t CHARGE_MIN_TEMPERATURE_C = 0;
@@ -497,8 +508,8 @@ private:
   Config _config;
   FuelGaugeDevice *_fg = nullptr;
 
-  // --- EDV trip-state members ---
-  int _edv_low_count = 0;
+  // EDV debounce count: lives in RTC memory (go_power.cpp), not here, so it
+  // spans deep-sleep wakes that poll the BMS once each.
 
   // --- Battery temperature state ---
 
@@ -536,4 +547,6 @@ RtcAppState load_rtc_app_state();
 #ifdef TEST_HOST
 /// Simulate invalid RTC storage independently of host test execution order.
 void invalidate_rtc_app_state_for_test();
+/// Clear the RTC-held EDV debounce count, as a power cut does.
+void reset_rtc_edv_state_for_test();
 #endif

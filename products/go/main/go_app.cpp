@@ -98,6 +98,21 @@ Screen charging_screen(const BmsStatus &status, Screen current) {
              : Screen::ShutdownCharging;
 }
 
+// Every safety trip powers off from the fast path: a deep-sleep cycle may
+// never reach the orchestrator's BMS timer.
+Screen safety_shutdown_screen(ShipModeRequest reason) {
+  switch (reason) {
+  case ShipModeRequest::OverDischarge:
+    return Screen::ShutdownDischarge;
+  case ShipModeRequest::UnderTemperature:
+    return Screen::ShutdownTemperatureLow;
+  case ShipModeRequest::OverTemperature:
+  case ShipModeRequest::None:
+  default:
+    return Screen::ShutdownTemperature;
+  }
+}
+
 struct StationaryStrings {
   std::string ap_ssid;               // "airgradient-<12-hex>"
   std::string hostname;              // "airgradient_<12-hex>"
@@ -647,6 +662,16 @@ GoApp::FastPathResult GoApp::execute_fast_path(const RtcAppState &state,
     if (!power_polled) {
       power_snapshot = pwr.poll_bms();
     }
+    // A low cell is confirmed within this wake: waiting a measurement interval
+    // per debounce sample would keep draining an empty cell. Bounded: an
+    // unreadable poll holds the count rather than moving it.
+    for (int extra = 1; extra < PowerService::EDV_SHIP_DEBOUNCE_SAMPLES &&
+                        power_snapshot.ship_mode_request == ShipModeRequest::None &&
+                        PowerService::edv_confirmation_pending();
+         ++extra) {
+      RTOS::delay_ms(PowerService::EDV_CONFIRM_INTERVAL_MS);
+      power_snapshot = pwr.poll_bms();
+    }
 
     // Recorded even when BLE is down: the connect windows before the next
     // measurement re-broadcast it.
@@ -665,11 +690,8 @@ GoApp::FastPathResult GoApp::execute_fast_path(const RtcAppState &state,
     const DisplayValues painted =
         snapshot_valid ? display_values_from_snapshot(*snapshot) : DisplayValues{};
     const DisplayValues *painted_ptr = snapshot_valid ? &painted : nullptr;
-    if (power_snapshot.ship_mode_request == ShipModeRequest::OverTemperature ||
-        power_snapshot.ship_mode_request == ShipModeRequest::UnderTemperature) {
-      values.screen = power_snapshot.ship_mode_request == ShipModeRequest::UnderTemperature
-                          ? Screen::ShutdownTemperatureLow
-                          : Screen::ShutdownTemperature;
+    if (power_snapshot.ship_mode_request != ShipModeRequest::None) {
+      values.screen = safety_shutdown_screen(power_snapshot.ship_mode_request);
       disp.init(values);
       return {
           .outcome = FastPathResult::Outcome::Shutdown,
