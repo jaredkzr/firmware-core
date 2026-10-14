@@ -344,16 +344,22 @@ the chip's persistent Data Memory and decides whether a factory reset and/or
 cell-config write is needed. Fuel-gauge bring-up is independent from the
 retryable BQ25629 initialization.
 
-The two-pass recovery sequence:
+The sequence:
 
-1. **Pass 1:** Read Design Capacity, Full Charge Capacity, and cell config
+1. **Chemistry:** read the Chem ID. When it is another recognised TI profile
+   (the chip ships on, and after a gauge POR returns to, the 4.35 V profile
+   `0x3230`), switch to the 4.2 V profile `0x1202` that matches the BQ25629
+   charge voltage. `fg_needs_chemistry_switch` (inline in `go_board.h`)
+   decides; an unreadable or unrecognised Chem ID leaves it alone, since a
+   switch resets the gauge's learned Qmax and Ra
+2. **Pass 1:** Read Design Capacity, Full Charge Capacity, and cell config
    from the chip. Call `evaluate_fg_state` with validity flags.
-2. If `needs_factory_reset`: issue `reset_to_factory_defaults()`, then
+3. If `needs_factory_reset`: issue `reset_to_factory_defaults()`, then
    re-read (pass 2) and call `evaluate_fg_state` again against the fresh
    ROM defaults.
-3. If `needs_config_write`: apply the AGo cell config
+4. If `needs_config_write`: apply the AGo cell config
    (`{2000 mAh, 7400 mWh, 3000 mV, 50 mA}`).
-4. Log a one-shot boot diagnostic snapshot (SOC, voltage, current, temp).
+5. Log a one-shot boot diagnostic snapshot (SOC, voltage, current, temp).
 
 Transient I2C errors cannot trigger a destructive reset. The `_ok` validity
 flags ensure only confidently-observed corruption drives recovery. On FG

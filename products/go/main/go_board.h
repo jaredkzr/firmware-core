@@ -63,6 +63,17 @@ inline FgRecoveryDecision evaluate_fg_state(uint16_t current_design_capacity_mah
   return out;
 }
 
+/// True when the gauge reports another TI chemistry profile than @p target.
+/// Only a recognised Chem ID counts: a failed or garbled read must not switch,
+/// because a switch resets the gauge's learned capacity and impedance.
+inline bool fg_needs_chemistry_switch(uint16_t chem_id, bool chem_ok, uint16_t target) {
+  if (!chem_ok || chem_id == target) {
+    return false;
+  }
+  return chem_id == FgChemId::CHEM_4V35 || chem_id == FgChemId::CHEM_4V2 ||
+         chem_id == FgChemId::CHEM_4V4;
+}
+
 // Forward declarations — avoid pulling full headers into the interface.
 class AccelSensor;
 class AgBleServer;

@@ -42,7 +42,7 @@ public:
   static constexpr size_t RA_TABLE_SIZE = FG_RA_TABLE_SIZE;
 
   /// 4.2 V chemistry profile (TI Chem ID label is hex: "1202" == 0x1202).
-  static constexpr uint16_t CHEM_ID_4V2 = 0x1202;
+  static constexpr uint16_t CHEM_ID_4V2 = FgChemId::CHEM_4V2;
 
   struct Config {
     uint8_t address = DEFAULT_ADDRESS;
