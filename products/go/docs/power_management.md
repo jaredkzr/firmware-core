@@ -15,10 +15,19 @@ For AGo, the power service also manages:
   below for the cell-OCP rationale
 - **EDV (over-discharge) trip:** requests ship mode
   (`ShipModeRequest::OverDischarge`) when cell voltage stays below 2.9 V
-  for 3 consecutive polls while on battery. The voltage comes from the
-  charger ADC, or from the fuel gauge when the charger reading is invalid.
-  The count lives in RTC memory, so it spans deep-sleep wakes, and a poll
-  that can't read the voltage or power source holds it. A deep-sleep fast
+  for 3 consecutive polls while on battery. The poll uses the lower of the
+  fuel gauge and charger ADC readings, ignoring either below
+  `EDV_MIN_PLAUSIBLE_CELL_V` (2.0 V, a failed read). On battery the BQ25629
+  ADC stops converting below 3.2 V (TS_ADC needs REGN), so its last reading
+  can stay above the threshold while the cell drains; the gauge measures the
+  cell directly. A gauge average current at or below
+  -`EDV_CURRENT_DEADBAND_MA` (10 mA) counts as on battery whatever the
+  charger's power-source status reports. Otherwise the charger status
+  decides: no external input (None, OTG or an unrecognised code) is on
+  battery unless the gauge sees charge current. External input or charge
+  current clears the count. The count lives in RTC memory, so it spans
+  deep-sleep wakes, and a poll with no supply evidence or no plausible
+  voltage holds it. A deep-sleep fast
   path wake that sees a low cell polls again every
   `EDV_CONFIRM_INTERVAL_MS` (at most 3 polls per wake), so it trips within
   that wake. The fast path, the orchestrator's boot poll and its BMS timer

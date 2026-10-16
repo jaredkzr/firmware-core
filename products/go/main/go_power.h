@@ -477,6 +477,13 @@ public:
   /// Spacing of the extra polls a deep-sleep wake takes to confirm a low cell
   /// within the same wake (see edv_confirmation_pending()).
   static constexpr uint32_t EDV_CONFIRM_INTERVAL_MS = 200;
+  /// Cell readings below this are failed reads (an unconverted ADC reads 0 V),
+  /// not a real cell: the system can't run from a cell this low.
+  static constexpr float EDV_MIN_PLAUSIBLE_CELL_V = 2.0f;
+  /// Gauge average current past this (either sign) says where the system is
+  /// drawing from. A discharging cell is on battery whatever the charger's
+  /// power-source status reports.
+  static constexpr int16_t EDV_CURRENT_DEADBAND_MA = 10;
   static constexpr float MV_PER_V = 1000.0f;
 
   // --- Battery temperature thresholds ---

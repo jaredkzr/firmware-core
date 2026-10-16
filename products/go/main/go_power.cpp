@@ -230,31 +230,54 @@ PowerSnapshot PowerService::poll_bms(bool pm_invalid_hint) {
   // EDV (over-discharge) trip — gated on explicit "on-battery" status
   // -------------------------------------------------------------------------
   {
-    const bool on_battery = status_ok && (bms_status.power_source == BmsPowerSource::None ||
-                                          bms_status.power_source == BmsPowerSource::OtgMode);
+    // Supply: the gauge's current sign is direct evidence, so a discharging
+    // cell counts as on battery whatever the charger reports (its power-source
+    // read can fail or decode to Unknown). The charger status decides when the
+    // gauge current is near zero or unreadable.
+    const bool fg_current_valid = status.fg_current_ma != BmsInvalid::CURRENT_MA;
+    const bool fg_discharging =
+        fg_current_valid && status.fg_current_ma <= -EDV_CURRENT_DEADBAND_MA;
+    const bool fg_charging = fg_current_valid && status.fg_current_ma >= EDV_CURRENT_DEADBAND_MA;
+    const bool charger_external =
+        status_ok && bms_power_source_has_external_input(bms_status.power_source);
+    const bool on_battery = fg_discharging || (status_ok && !charger_external && !fg_charging);
+    const bool on_external = !on_battery && (fg_charging || charger_external);
 
-    // Charger ADC first; the gauge's own cell voltage covers a failed or
-    // not-yet-converted charger reading.
+    // Cell voltage: the lowest plausible reading. On battery the BQ25629 ADC
+    // stops converting below 3.2 V (TS_ADC needs REGN), so its last reading
+    // can sit above the threshold while the cell keeps draining; the gauge
+    // measures the cell directly.
     float cell_v = BmsInvalid::VOLT;
-    if (telemetry_ok && telemetry.is_battery_voltage_valid()) {
-      cell_v = telemetry.battery_voltage;
-    } else if (status.fg_voltage_mv != BmsInvalid::VOLTAGE_MV) {
-      cell_v = static_cast<float>(status.fg_voltage_mv) / MV_PER_V;
+    if (status.fg_voltage_mv != BmsInvalid::VOLTAGE_MV) {
+      const float fg_v = static_cast<float>(status.fg_voltage_mv) / MV_PER_V;
+      if (fg_v >= EDV_MIN_PLAUSIBLE_CELL_V) {
+        cell_v = fg_v;
+      }
     }
-    const bool cell_v_valid = cell_v >= BmsRange::MIN_VALID_VOLT;
+    if (telemetry_ok && telemetry.battery_voltage >= EDV_MIN_PLAUSIBLE_CELL_V &&
+        (cell_v < 0.0f || telemetry.battery_voltage < cell_v)) {
+      cell_v = telemetry.battery_voltage;
+    }
+    const bool cell_v_valid = cell_v >= EDV_MIN_PLAUSIBLE_CELL_V;
 
     if (on_battery && cell_v_valid) {
       if (cell_v < EDV_SHIP_THRESHOLD_V) {
         if (s_rtc_edv_low_count < UINT8_MAX) {
           ++s_rtc_edv_low_count;
         }
+        AG_LOGW(TAG, "EDV low %d/%d: cell %.2fV (fg=%umV chg=%.2fV) src=%s fg_i=%dmA",
+                static_cast<int>(s_rtc_edv_low_count), EDV_SHIP_DEBOUNCE_SAMPLES, cell_v,
+                static_cast<unsigned>(status.fg_voltage_mv), telemetry.battery_voltage,
+                status_ok ? bms_power_source_str(bms_status.power_source) : "unread",
+                static_cast<int>(status.fg_current_ma));
       } else {
         s_rtc_edv_low_count = 0;
       }
-    } else if (status_ok && !on_battery) {
+    } else if (on_external) {
       s_rtc_edv_low_count = 0; // external power holds the cell up
     }
-    // An unreadable source or voltage neither advances nor clears the count.
+    // No supply evidence or no plausible voltage neither advances nor clears
+    // the count.
 
     if (s_rtc_edv_low_count >= EDV_SHIP_DEBOUNCE_SAMPLES) {
       AG_LOGW(TAG, "EDV trip: cell %.2fV < %.1fV for %d polls -> requesting ship mode", cell_v,

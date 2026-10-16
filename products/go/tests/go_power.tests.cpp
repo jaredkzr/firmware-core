@@ -1604,6 +1604,98 @@ TEST_CASE("poll_bms: EDV falls back to the gauge's cell voltage", "[PowerService
   CHECK(snap.ship_mode_request == ShipModeRequest::OverDischarge);
 }
 
+TEST_CASE("poll_bms: EDV trusts the gauge when the charger can't see the cell",
+          "[PowerService][edv][fg]") {
+  reset_rtc_edv_state_for_test();
+  MockBmsDevice mock_bms;
+  MockFuelGaugeDevice mock_fg;
+  PowerService svc(&mock_bms, test_gpio_hal, DEFAULT_CONFIG);
+  svc.set_fuel_gauge(&mock_fg);
+
+  // Per-section inputs, read by the expectations below.
+  uint16_t fg_mv = 2600;
+  int16_t fg_ma = -180;
+  bool fg_ma_ok = true;
+  float chg_v = 3.2f; // charger ADC stopped converting below 3.2 V on battery
+  bool status_ok = true;
+  BmsPowerSource source = BmsPowerSource::None;
+
+  ALLOW_CALL(mock_fg, ready()).RETURN(true);
+  ALLOW_CALL(mock_fg, read_soc_percent(trompeloeil::_)).SIDE_EFFECT(_1 = 0).RETURN(true);
+  ALLOW_CALL(mock_fg, read_voltage_mv(trompeloeil::_)).LR_SIDE_EFFECT(_1 = fg_mv).RETURN(true);
+  ALLOW_CALL(mock_fg, read_average_current_ma(trompeloeil::_))
+      .LR_SIDE_EFFECT(_1 = fg_ma)
+      .LR_RETURN(fg_ma_ok);
+  ALLOW_CALL(mock_fg, read_average_power_mw(trompeloeil::_)).RETURN(false);
+  ALLOW_CALL(mock_fg, read_remaining_capacity_mah(trompeloeil::_)).RETURN(false);
+  ALLOW_CALL(mock_fg, read_full_charge_capacity_mah(trompeloeil::_)).RETURN(false);
+  ALLOW_CALL(mock_fg, read_internal_temperature_c(trompeloeil::_)).RETURN(false);
+  ALLOW_CALL(mock_fg, read_flags(trompeloeil::_)).RETURN(false);
+  ALLOW_CALL(mock_bms, read_telemetry(trompeloeil::_))
+      .LR_SIDE_EFFECT(_1.battery_voltage = chg_v)
+      .RETURN(true);
+  ALLOW_CALL(mock_bms, read_status(trompeloeil::_))
+      .LR_SIDE_EFFECT(_1.power_source = source)
+      .LR_RETURN(status_ok);
+  ALLOW_CALL(mock_bms, set_charge_enable(trompeloeil::_)).RETURN(true);
+
+  const auto poll_debounce = [&svc]() {
+    PowerSnapshot snap;
+    for (int i = 0; i < PowerService::EDV_SHIP_DEBOUNCE_SAMPLES; ++i) {
+      snap = svc.poll_bms();
+    }
+    return snap.ship_mode_request;
+  };
+
+  SECTION("stale charger ADC above the threshold: the gauge's low cell trips") {
+    CHECK(poll_debounce() == ShipModeRequest::OverDischarge);
+  }
+
+  SECTION("charger status unreadable: a discharging gauge still trips") {
+    status_ok = false;
+    CHECK(poll_debounce() == ShipModeRequest::OverDischarge);
+  }
+
+  SECTION("unrecognised power source: counts as on battery") {
+    source = BmsPowerSource::Unknown;
+    fg_ma_ok = false;
+    CHECK(poll_debounce() == ShipModeRequest::OverDischarge);
+  }
+
+  SECTION("adapter reported but the cell is discharging: trips") {
+    source = BmsPowerSource::UsbSdp;
+    CHECK(poll_debounce() == ShipModeRequest::OverDischarge);
+  }
+
+  SECTION("pre-charging a low cell on USB: no trip, count cleared") {
+    source = BmsPowerSource::UnknownAdapter;
+    fg_mv = 2770;
+    fg_ma = 17;
+    chg_v = 2.78f;
+    CHECK(poll_debounce() == ShipModeRequest::None);
+    CHECK_FALSE(PowerService::edv_confirmation_pending());
+  }
+
+  SECTION("charger says no adapter but the gauge sees charge: no trip") {
+    fg_ma = 17;
+    CHECK(poll_debounce() == ShipModeRequest::None);
+    CHECK_FALSE(PowerService::edv_confirmation_pending());
+  }
+
+  SECTION("the lower of the two readings decides: low charger, healthy gauge") {
+    fg_mv = 3600;
+    chg_v = 2.8f;
+    CHECK(poll_debounce() == ShipModeRequest::OverDischarge);
+  }
+
+  SECTION("implausible readings on both sources hold the count") {
+    fg_mv = 0;
+    chg_v = 0.0f;
+    CHECK(poll_debounce() == ShipModeRequest::None);
+    CHECK_FALSE(PowerService::edv_confirmation_pending());
+  }
+}
+
 // ============================================================================
 // TEST CASE 10 — poll_bms: battery temperature protection
 // ============================================================================
