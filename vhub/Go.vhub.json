@@ -1,6 +1,6 @@
 {
   "schema_version": "1.0",
-  "rev": "ae0d11b",
+  "rev": "ac3aa8d",
   "product": {
     "slug": "airgradient-go",
     "name": "AirGradient Go",
@@ -672,7 +672,7 @@
       "sub_category": "Safety trips",
       "applies_to": ["V1"],
       "description": "A cell below 2.9 V powers the unit off into ship mode from every path, including Portable Sleep and Offline deep-sleep wakes",
-      "expected_result": "With the battery replaced by a bench supply at 3.40 V and USB unplugged, set Portable Sleep: On, interval=60, no phone connected, and lock. Lower the supply to 2.85 V while the unit sleeps. On the next measurement wake serial logs \"EDV trip: cell 2.8…V < 2.9V for 3 polls -> requesting ship mode\" within that wake (three poll_bms lines about 200 ms apart, not one per interval), the display shows the critically-low page (\"Battery critically low\", \"Connect charger\"), and the unit enters ship mode: supply current drops to the ship-mode level and no advertisement bursts or wakes occur for two minutes. Raise the supply to 3.40 V and press Power: the unit cold-boots normally. Repeat in Offline mode with the same result. Repeat unlocked in Portable mode with Portable Sleep Off and a phone connected: the trip fires within three BMS polls (about 90 seconds) and BLE Status notifies disc=low_batt before the link drops. Hold the supply at 2.85 V and press Power: the unit boots, then shuts down again with the same page within about 90 seconds. With USB plugged in at 2.85 V, no trip occurs.",
+      "expected_result": "With the battery replaced by a bench supply at 3.40 V and USB unplugged, set Portable Sleep: On, interval=60, no phone connected, and lock. Lower the supply to 2.85 V while the unit sleeps. On the next measurement wake serial logs \"EDV trip: cell 2.8…V < 2.9V for 3 polls -> requesting ship mode\" within that wake (three poll_bms lines about 200 ms apart, not one per interval), the display shows the critically-low page (\"Battery critically low\", \"Connect charger\"), and the unit enters ship mode: supply current drops to the ship-mode level and no advertisement bursts or wakes occur for two minutes. Raise the supply to 3.40 V and press Power: the unit cold-boots normally. Each low poll before the trip logs \"EDV low n/3: cell …\" with the gauge (fg=) and charger (chg=) readings. Repeat in Offline mode with the same result. Repeat unlocked in Portable mode with Portable Sleep Off and a phone connected: the trip fires within three BMS polls (about 90 seconds) and BLE Status notifies disc=low_batt before the link drops. Repeat that case starting at 3.40 V on USB, unplug USB while the unit stays awake, then lower the supply to 2.85 V without rebooting: the trip still fires even when chg= stays at or above 3.2 V (the charger ADC stops converting on battery below 3.2 V). Hold the supply at 2.85 V and press Power: the unit boots, then shuts down again with the same page within about 90 seconds. With USB plugged in at 2.85 V, no trip occurs.",
       "notes": "Requires a current-limited bench supply wired in place of the cell (observe connector polarity) and serial capture across wakes. A dip that recovers above 2.9 V before the third consecutive reading must not trip. Restore Portable Sleep, mode and interval afterward."
     },
     {
