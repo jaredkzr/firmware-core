@@ -358,7 +358,11 @@ The sequence:
    re-read (pass 2) and call `evaluate_fg_state` again against the fresh
    ROM defaults.
 4. If `needs_config_write`: apply the AGo cell config
-   (`{2000 mAh, 7400 mWh, 3000 mV, 50 mA}`).
+   (`{2000 mAh, 7400 mWh, 3000 mV, 10 mA}`). The last field is the gauge's
+   Sleep Current: below it the gauge samples periodically instead of
+   coulomb counting continuously. 10 mA is under the average draw of every
+   Go duty cycle. A unit that has the old 50 mA gets the new value on its
+   next boot.
 5. Log a one-shot boot diagnostic snapshot (SOC, voltage, current, temp).
 
 Transient I2C errors cannot trigger a destructive reset. The `_ok` validity

@@ -71,7 +71,11 @@ static constexpr FgCellConfig AGO_CELL_CONFIG = {
     .design_capacity_mah = 2000,
     .design_energy_mwh = 7400,
     .terminate_voltage_mv = 3000,
-    .sleep_current_ma = 50,
+    // Below this averaged current the gauge drops to periodic sampling (its
+    // SLEEP mode). TI's 10 mA default sits under every Go duty cycle; 50 mA
+    // put the whole Portable Sleep pattern (~38 mA average with short awake
+    // bursts) on periodic samples instead of continuous coulomb counting.
+    .sleep_current_ma = 10,
 };
 
 // FG DM corruption sanity ranges.  A reading outside any of these
