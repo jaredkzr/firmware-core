@@ -136,6 +136,7 @@ extern int decide_sleep_call_count;
 extern bool last_decide_sleep_ble_link;
 extern int led_shutdown_count;
 extern int sensor_idle_for_sleep_count;
+extern int sensor_gas_heater_off_count;
 extern bool pm_power_set;
 extern bool pm_power_on;
 extern uint32_t pm_power_set_count;
@@ -6711,6 +6712,37 @@ TEST_CASE("prepare_for_sleep: short sleep keeps PM measuring and saves warm stat
   CHECK(test_spy::led_shutdown_count == 1);
 }
 
+TEST_CASE("prepare_for_sleep: Portable warm hold still switches the SGP41 heater off",
+          "[Orchestrator][sleep][pm]") {
+  TestFixture f;
+  auto orch = f.make_orchestrator();
+  A::set_mode(orch, OperatingMode::Portable);
+  A::sensor_ready(orch);
+
+  test_spy::hold_pm_sensor_to_return = true;
+
+  A::prepare_for_sleep(orch, 10000);
+
+  CHECK(test_spy::last_saved_state.has_flag(RtcAppFlag::SensorsWarm));
+  CHECK(test_spy::sensor_idle_for_sleep_count == 0);
+  // Portable Sleep wakes never read the SGP41, so nothing would switch it off.
+  CHECK(test_spy::sensor_gas_heater_off_count == 1);
+}
+
+TEST_CASE("prepare_for_sleep: Offline warm hold keeps the SGP41 heating",
+          "[Orchestrator][sleep][pm]") {
+  TestFixture f;
+  auto orch = f.make_orchestrator();
+  A::set_mode(orch, OperatingMode::Offline);
+  A::sensor_ready(orch);
+
+  test_spy::hold_pm_sensor_to_return = true;
+
+  A::prepare_for_sleep(orch, 10000);
+
+  CHECK(test_spy::sensor_gas_heater_off_count == 0);
+}
+
 TEST_CASE("prepare_for_sleep: preparing PM is awake and may be held warm",
           "[Orchestrator][sleep][pm]") {
   TestFixture f;
@@ -7126,7 +7158,7 @@ TEST_CASE("init(Button, display_painted + snapshot): backward-compatible with bu
   snapshot.temperature_c = 21.0f;
   snapshot.humidity_pct = 55.0f;
   snapshot.tvoc_index = 100;
-  snapshot.nox_index = 25;
+  snapshot.pm10_ugm3 = 18.5f;
   snapshot.pressure_hpa = 1013.25f;
   snapshot.altitude_m = 110.0f;
 
@@ -7147,7 +7179,7 @@ TEST_CASE("init(Button, display_painted + snapshot): backward-compatible with bu
   CHECK(A::corrected_measures(orch).temp_hum_a.temperature == 21.0f);
   CHECK(A::corrected_measures(orch).temp_hum_a.humidity == 55.0f);
   CHECK(A::corrected_measures(orch).tvoc_nox.tvoc_index == 100);
-  CHECK(A::corrected_measures(orch).tvoc_nox.nox_index == 25);
+  CHECK(A::corrected_measures(orch).pm_a.pm_10 == 18.5f);
   CHECK(A::corrected_measures(orch).pressure.pressure == 1013.25f);
   CHECK(A::corrected_measures(orch).pressure.altitude == 110.0f);
   CHECK_FALSE(A::raw_measures(orch).co2.is_valid());

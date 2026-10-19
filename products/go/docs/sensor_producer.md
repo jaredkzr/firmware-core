@@ -294,7 +294,10 @@ then calls `start_measures(1, TvocNox)` and caches the result in
 #### Offline (fast path)
 
 In Offline mode and Portable Sleep, no `SensorProducer` is created. The fast
-path calls `start_measures(1, All)` directly on `SensorManager`, after
+path calls `start_measures()` directly on `SensorManager`. Portable Sleep
+leaves out the `TvocNox` group and skips SGP41 conditioning, so the SGP41
+stays off and TVOC/NOx are invalid on those wakes. Offline calls
+`start_measures(1, All)`, after
 `resume_gas_index_for_sample()` restores the algorithm state the previous wake
 saved in RTC memory, retimed to the real gap between samples (a fresh
 algorithm when none is saved or it is over 1 h old). The state is saved again

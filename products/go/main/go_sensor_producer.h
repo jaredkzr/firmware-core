@@ -65,6 +65,10 @@ public:
   /// re-initialize the sensors, so never use this when the task restarts.
   void idle_sensors_for_sleep();
 
+  /// Switch only the TVOC/NOx heater off before a sleep that holds the other
+  /// sensors warm. Call only after stop(), like idle_sensors_for_sleep().
+  void tvoc_nox_heater_off_for_sleep();
+
   /// Copy the gas-index algorithm state for the next boot to resume. Call
   /// only after stop(), so the sampler cannot advance it mid-copy. Returns
   /// false while the task runs or when the algorithm is not configured.

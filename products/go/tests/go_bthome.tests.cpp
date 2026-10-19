@@ -28,31 +28,31 @@ BthomeReadings full_readings() {
   r.battery_pct = 87.4f;
   r.temperature_c = 23.456f;
   r.pm25_ugm3 = 12.6f;
+  r.pm10_ugm3 = 18.4f;
   r.co2_ppm = 615;
   r.humidity_pct = 45.5f;
   r.tvoc_index = 120;
-  r.nox_index = 1;
   return r;
 }
 
 } // namespace
 
-TEST_CASE("BTHome: all readings fill the legacy payload exactly", "[BTHome]") {
+TEST_CASE("BTHome: all readings fit the legacy payload", "[BTHome]") {
   const std::vector<uint8_t> expected = {
       0x02, 0x01, 0x06,             // flags
-      0x1B, 0x16, 0xD2, 0xFC, 0x40, // service data, UUID 0xFCD2, v2 unencrypted
+      0x19, 0x16, 0xD2, 0xFC, 0x40, // service data, UUID 0xFCD2, v2 unencrypted
       0x00, 0x07,                   // packet id
       0x01, 0x57,                   // battery 87 %
       0x02, 0x2A, 0x09,             // temperature 2346 x 0.01 °C
       0x0D, 0x0D, 0x00,             // PM2.5 13 µg/m³
+      0x0E, 0x12, 0x00,             // PM10 18 µg/m³
       0x12, 0x67, 0x02,             // CO2 615 ppm
       0x2E, 0x2E,                   // humidity 46 %
       0x3D, 0x78, 0x00,             // count uint16: TVOC index 120
-      0x3E, 0x01, 0x00, 0x00, 0x00, // count uint32: NOx index 1
   };
   const auto adv = encode(full_readings(), 7);
   CHECK(adv == expected);
-  CHECK(adv.size() == BTHOME_ADV_MAX_LEN);
+  CHECK(adv.size() <= BTHOME_ADV_MAX_LEN);
 }
 
 TEST_CASE("BTHome: invalid readings are omitted", "[BTHome]") {
@@ -64,14 +64,19 @@ TEST_CASE("BTHome: invalid readings are omitted", "[BTHome]") {
   CHECK(encode(BthomeReadings{}, 0xFF) == expected);
 }
 
-TEST_CASE("BTHome: NOx keeps its own object without TVOC", "[BTHome]") {
+TEST_CASE("BTHome: PM10 follows PM2.5 and precedes CO2", "[BTHome]") {
   BthomeReadings r{};
-  r.nox_index = 3;
+  r.pm25_ugm3 = 3.0f;
+  r.pm10_ugm3 = 70000.0f; // saturates
+  r.co2_ppm = 500;
   const auto adv = encode(r, 0);
-  REQUIRE(adv.size() == 15);
-  CHECK(adv[3] == 0x0B);
-  CHECK(adv[10] == 0x3E);
-  CHECK(adv[11] == 0x03);
+  REQUIRE(adv.size() == 19);
+  CHECK(adv[3] == 0x0F);
+  CHECK(adv[10] == 0x0D);
+  CHECK(adv[13] == 0x0E);
+  CHECK(adv[14] == 0xFF);
+  CHECK(adv[15] == 0xFF);
+  CHECK(adv[16] == 0x12);
 }
 
 TEST_CASE("BTHome: negative temperature is two's complement", "[BTHome]") {
@@ -104,6 +109,7 @@ TEST_CASE("BTHome: readings take only validated fields", "[BTHome]") {
   m.temp_hum_a.temperature = 21.5f;
   m.temp_hum_a.humidity = 150.0f; // out of range
   m.pm_a.pm_25 = 4.0f;
+  m.pm_a.pm_10 = 6.5f;
   m.co2.co2 = 20000; // out of range
   m.tvoc_nox.tvoc_index = 100;
   m.tvoc_nox.nox_index = 25000; // raw ticks, not an index
@@ -112,9 +118,9 @@ TEST_CASE("BTHome: readings take only validated fields", "[BTHome]") {
   CHECK(r.temperature_c == 21.5f);
   CHECK(r.humidity_pct == MeasuresInvalid::HUMIDITY);
   CHECK(r.pm25_ugm3 == 4.0f);
+  CHECK(r.pm10_ugm3 == 6.5f);
   CHECK(r.co2_ppm == MeasuresInvalid::CO2);
   CHECK(r.tvoc_index == 100);
-  CHECK(r.nox_index == MeasuresInvalid::NOX);
   CHECK(r.battery_pct == 64.0f);
 
   CHECK(bthome_readings_from(m, MeasuresInvalid::BATTERY_PERCENT).battery_pct ==

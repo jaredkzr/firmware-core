@@ -136,10 +136,16 @@ TEST_CASE("ChartHistory", "[ChartHistory]") {
   SECTION("gas index values above 500 are not charted") {
     MeasuresAGo m{};
     m.tvoc_nox.tvoc_index = 29806;
-    m.tvoc_nox.nox_index = 1;
     h.record(m, T0);
     CHECK(h.read(ChartSeries::Tvoc, T0, 0, out, 1).count == 0);
-    CHECK(h.read(ChartSeries::Nox, T0, 0, out, 1).count == 1);
+  }
+
+  SECTION("PM10 is charted at 0.1 ug/m3") {
+    MeasuresAGo m{};
+    m.pm_a.pm_10 = 23.4f;
+    h.record(m, T0);
+    REQUIRE(h.read(ChartSeries::Pm10, T0, 0, out, 1).count == 1);
+    CHECK(out[0] == Catch::Approx(23.4f));
   }
 
   SECTION("clear empties the history") {

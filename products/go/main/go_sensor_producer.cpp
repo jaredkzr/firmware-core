@@ -72,6 +72,14 @@ void SensorProducer::idle_sensors_for_sleep() {
   _manager.idle_for_sleep();
 }
 
+void SensorProducer::tvoc_nox_heater_off_for_sleep() {
+  if (_task_handle != nullptr) {
+    AG_LOGW(TAG, "tvoc_nox_heater_off_for_sleep ignored: task still running");
+    return;
+  }
+  (void)_manager.tvoc_nox_heater_off();
+}
+
 bool SensorProducer::tvoc_nox_index_state(TvocNoxIndexState &out) const {
   if (_task_handle != nullptr) {
     return false;

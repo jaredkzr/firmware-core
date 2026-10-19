@@ -107,27 +107,28 @@ leave no room for sensor data in the connectable advertisement. The broadcast
 uses the NimBLE default non-connectable interval (100-150 ms) and is
 unencrypted: anyone in range can read the values.
 
-The payload fills the 31-byte legacy limit exactly:
+With every reading valid the payload is 29 of the 31 legacy bytes:
 
 | Bytes | Content |
 |---|---|
 | `02 01 06` | Flags |
-| `1B 16 D2 FC 40` | Service data, UUID `0xFCD2`, BTHome v2 unencrypted, regular interval |
+| `19 16 D2 FC 40` | Service data, UUID `0xFCD2`, BTHome v2 unencrypted, regular interval |
 | `00 <id>` | Packet id, one per measurement |
 | `01 <u8>` | Battery, % |
 | `02 <s16>` | Temperature, 0.01 degrees C |
 | `0D <u16>` | PM2.5, ug/m3 |
+| `0E <u16>` | PM10, ug/m3 |
 | `12 <u16>` | CO2, ppm |
 | `2E <u8>` | Humidity, % |
 | `3D <u16>` | Count: TVOC index |
-| `3E <u32>` | Count: NOx index |
 
 Values are the corrected (displayed) readings, since a listener cannot apply
 the correction settings. Invalid fields are omitted and the service-data
-length shrinks to match. BTHome has no gas-index object, so the indices use the
-two count objects; they have different object ids so NOx stays the second
-count when TVOC is missing. Home Assistant shows them as two count sensors,
-TVOC first.
+length shrinks to match. BTHome has no gas-index object, so the TVOC index uses
+a count object, which Home Assistant shows as a count sensor. NOx is not
+broadcast, and Portable Sleep measurement wakes leave the SGP41 off, so TVOC
+is only present while a phone keeps the Go awake (see
+[Portable Sleep](power_management.md#portable-sleep)).
 
 Each new measurement is recorded in RTC memory with `save_rtc_bthome()`
 (orchestrator `on_sensor_data()`, and the fast-path measurement wake), which

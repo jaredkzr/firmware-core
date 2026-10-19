@@ -914,8 +914,11 @@ void format_chart_stat(char *out, size_t out_size, Metric metric, float value, b
     format_humidity_value(out, out_size, value);
     break;
   case Metric::Tvoc:
-  case Metric::Nox:
     format_float_index_value(out, out_size, value);
+    break;
+  case Metric::Pm10:
+    // No PM10 US AQI on the Go: always ug/m3.
+    format_pm_value(out, out_size, value, false);
     break;
   case Metric::Pressure:
     // One decimal and no unit: pressure moves by tenths of an hPa, and both
@@ -971,8 +974,8 @@ const char *chart_panel_title(Metric metric, bool pm_use_usaqi) {
     return "Humidity";
   case Metric::Tvoc:
     return "TVOC";
-  case Metric::Nox:
-    return "NOx";
+  case Metric::Pm10:
+    return "PM10 (ug/m3)";
   case Metric::Pressure:
     return "Pressure";
   case Metric::Altitude:
@@ -1000,8 +1003,8 @@ void format_chart_panel_value(char *out, size_t out_size, const DisplayValues &v
   case Metric::Tvoc:
     format_int_index_value(out, out_size, v.tvoc_index);
     break;
-  case Metric::Nox:
-    format_int_index_value(out, out_size, v.nox_index);
+  case Metric::Pm10:
+    format_pm_value(out, out_size, v.pm10_ugm3, false);
     break;
   case Metric::Pressure:
     format_pressure_value(out, out_size, v.pressure_hpa);
@@ -1893,13 +1896,13 @@ void DisplayService::_draw_home(const DisplayValues &v) {
   draw_cell(&_u8g2, 0, "Temperature", temp_buf, true);
   draw_cell(&_u8g2, 1, "Humidity", hum_buf, false);
 
-  // Row 2: TVOC / NOx
+  // Row 2: TVOC / PM10
   char tvoc_buf[24];
-  char nox_buf[24];
+  char pm10_buf[24];
   format_int_index_value(tvoc_buf, sizeof(tvoc_buf), v.tvoc_index);
-  format_int_index_value(nox_buf, sizeof(nox_buf), v.nox_index);
+  format_pm_value(pm10_buf, sizeof(pm10_buf), v.pm10_ugm3, false);
   draw_cell(&_u8g2, 2, "TVOC", tvoc_buf, false);
-  draw_cell(&_u8g2, 3, "NOx", nox_buf, false);
+  draw_cell(&_u8g2, 3, "PM10", pm10_buf, false);
 
   // Row 3: Pressure / Altitude
   char pressure_buf[24];

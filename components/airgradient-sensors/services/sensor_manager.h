@@ -180,6 +180,11 @@ public:
   /// I2C failures are logged and never block sleep entry.
   void idle_for_sleep();
 
+  /// Switch only the TVOC/NOx hotplate off, for a sleep that holds the other
+  /// sensors warm. The next conditioning or read re-heats it. No-op when no
+  /// TVOC/NOx sensor is wired; a failed command is logged and returns false.
+  bool tvoc_nox_heater_off();
+
   /// True if a TVOC/NOx sensor is wired into this manager.
   bool has_tvoc_nox_sensor() const { return _sensors.tvoc_nox != nullptr; }
 

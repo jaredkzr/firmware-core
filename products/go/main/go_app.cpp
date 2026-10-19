@@ -530,6 +530,10 @@ GoApp::FastPathResult GoApp::execute_fast_path(const RtcAppState &state,
   const auto interrupted = [&]() { return button_pressed || phone_connected(); };
 
   SensorManager &sm = _board.sensors(state.has_flag(RtcAppFlag::SensorsWarm));
+  // Portable Sleep wakes leave the SGP41 off: heating it for TVOC heats the
+  // NOx pixel too, so TVOC/NOx are measured only while a phone keeps the Go
+  // awake. The gas-index state saved at sleep entry is left as it was.
+  const bool measure_gas = state.mode != OperatingMode::Portable;
 
   bool promote = false;
 
@@ -544,7 +548,7 @@ GoApp::FastPathResult GoApp::execute_fast_path(const RtcAppState &state,
     for (int i = 0; i < warmup_iters && !promote; i++) {
       AG_LOGI(TAG, "fast-path: warmup iteration %d/%d", i + 1, warmup_iters);
       uint64_t start = RTOS::get_time_ms();
-      sm.warmup_step();
+      sm.warmup_step(measure_gas);
 
       if (interrupted()) {
         promote = true;
@@ -570,10 +574,16 @@ GoApp::FastPathResult GoApp::execute_fast_path(const RtcAppState &state,
     // in RTC so the index keeps its learned baseline (a fresh algorithm would
     // still be in its 45 s blackout), then save it again for the next wake.
     const uint32_t gas_sample_s = tracking_seconds_from_ms(RTOS::get_retained_time_ms());
-    const bool gas_index_ready = resume_gas_index_for_sample(
-        sm, gas_sample_s, static_cast<uint32_t>(settings.measure_interval_seconds) * 1000,
-        settings.tvoc_learning_offset, settings.nox_learning_offset);
-    Measures measures = sm.start_measures(1, SensorGroup::All);
+    const bool gas_index_ready =
+        measure_gas &&
+        resume_gas_index_for_sample(sm, gas_sample_s,
+                                    static_cast<uint32_t>(settings.measure_interval_seconds) * 1000,
+                                    settings.tvoc_learning_offset, settings.nox_learning_offset);
+    const SensorGroup groups =
+        measure_gas ? SensorGroup::All
+                    : static_cast<SensorGroup>(static_cast<uint8_t>(SensorGroup::All) &
+                                               ~static_cast<uint8_t>(SensorGroup::TvocNox));
+    Measures measures = sm.start_measures(1, groups);
     TvocNoxIndexState gas_state{};
     if (gas_index_ready && sm.get_tvoc_nox_index_state(gas_state)) {
       save_rtc_gas_index(gas_state, gas_sample_s);
@@ -582,10 +592,10 @@ GoApp::FastPathResult GoApp::execute_fast_path(const RtcAppState &state,
     has_measures = true;
     AG_LOGI(TAG,
             "fast-path: temp=%.1f hum=%.1f pm25=%.1f co2=%d tvoc=%d nox=%d "
-            "tvoc_raw=%d nox_raw=%d pres=%.1f",
+            "tvoc_raw=%d nox_raw=%d pres=%.1f pm10=%.1f",
             ago.temp_hum_a.temperature, ago.temp_hum_a.humidity, ago.pm_a.pm_25, ago.co2.co2,
             ago.tvoc_nox.tvoc_index, ago.tvoc_nox.nox_index, ago.tvoc_nox.tvoc_raw,
-            ago.tvoc_nox.nox_raw, ago.pressure.pressure);
+            ago.tvoc_nox.nox_raw, ago.pressure.pressure, ago.pm_a.pm_10);
     if (interrupted()) {
       promote = true;
     }
@@ -801,10 +811,10 @@ void GoApp::run_button_wake_path(const RtcAppState &state) {
 
   AG_LOGI(TAG,
           "button_wake: snapshot_valid=%d co2=%d pm25=%.1f temp=%.1f hum=%.1f "
-          "tvoc=%d nox=%d pres=%.1f alt=%.1f batt=%d charging=%d "
+          "tvoc=%d pm10=%.1f pres=%.1f alt=%.1f batt=%d charging=%d "
           "gps_en=%d gps_fix=%d tracking=%d ble=%d fahrenheit=%d feet=%d usaqi=%d",
           snapshot_valid, snapshot.co2_ppm, snapshot.pm25_ugm3, snapshot.temperature_c,
-          snapshot.humidity_pct, snapshot.tvoc_index, snapshot.nox_index, snapshot.pressure_hpa,
+          snapshot.humidity_pct, snapshot.tvoc_index, snapshot.pm10_ugm3, snapshot.pressure_hpa,
           snapshot.altitude_m, snapshot.battery_pct, snapshot.is_battery_charging,
           snapshot.gps_enabled, snapshot.gps_fix, static_cast<int>(snapshot.tracking_state),
           snapshot.ble_enabled, snapshot.use_fahrenheit, snapshot.use_feet, snapshot.pm_use_usaqi);
@@ -1312,8 +1322,8 @@ DisplayValues build_fast_path_display(const MeasuresAGo &measures, const GpsData
   if (corrected.tvoc_nox.is_tvoc_index_valid()) {
     v.tvoc_index = corrected.tvoc_nox.tvoc_index;
   }
-  if (corrected.tvoc_nox.is_nox_index_valid()) {
-    v.nox_index = corrected.tvoc_nox.nox_index;
+  if (corrected.pm_a.is_pm_10_valid()) {
+    v.pm10_ugm3 = corrected.pm_a.pm_10;
   }
   if (corrected.pressure.is_pressure_valid()) {
     v.pressure_hpa = corrected.pressure.pressure;
