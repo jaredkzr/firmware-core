@@ -516,7 +516,7 @@ TEST_CASE("UIManager: metric cycling on Home", "[UIManager][metric]") {
     press(ui, InputSource::TouchDown);
     check_metric(Metric::Humidity);
     press(ui, InputSource::TouchDown);
-    check_metric(Metric::Tvoc);
+    check_metric(Metric::Pm1);
     press(ui, InputSource::TouchDown);
     check_metric(Metric::Pm10);
     press(ui, InputSource::TouchDown);
@@ -1577,14 +1577,14 @@ TEST_CASE("UIManager: chart extraction from the chart history", "[UIManager][cha
     CHECK(v.chart_max == Catch::Approx(40.0f));
   }
 
-  SECTION("TVOC chart plots index values only") {
-    select_metric(Metric::Tvoc);
+  SECTION("PM1.0 chart bridges a missing bucket") {
+    select_metric(Metric::Pm1);
     MeasuresAGo m{};
-    m.tvoc_nox.tvoc_index = 100;
+    m.pm_a.pm_01 = 100.0f;
     history.record(m, 1200);
-    m.tvoc_nox.tvoc_index = 29806; // raw SRAW ticks, not an index
+    m.pm_a.pm_01 = MeasuresInvalid::PM; // no reading this bucket
     history.record(m, 1200 + CHART_HISTORY_BUCKET_S);
-    m.tvoc_nox.tvoc_index = 140;
+    m.pm_a.pm_01 = 140.0f;
     history.record(m, 1200 + 2 * CHART_HISTORY_BUCKET_S);
 
     auto ctx = make_default_ctx();

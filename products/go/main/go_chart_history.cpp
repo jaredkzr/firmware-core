@@ -27,7 +27,7 @@
 namespace {
 
 // Bump when the ChartHistory layout or bucket width changes.
-constexpr uint32_t CHART_HISTORY_MAGIC = 0x43484902; // "CHI" v2
+constexpr uint32_t CHART_HISTORY_MAGIC = 0x43484903; // "CHI" v3
 constexpr uint32_t TIME_UNKNOWN_S = UINT32_MAX;
 constexpr int16_t EMPTY = INT16_MIN;
 
@@ -37,7 +37,7 @@ constexpr float SCALE[CHART_SERIES_COUNT] = {
     1.0f,   // Co2: ppm
     100.0f, // Temp: 0.01 C
     100.0f, // Humidity: 0.01 %
-    1.0f,   // Tvoc: index
+    10.0f,  // Pm1: 0.1 ug/m3
     10.0f,  // Pm10: 0.1 ug/m3
     10.0f,  // Pressure: 0.1 hPa
     1.0f,   // Altitude: m
@@ -58,9 +58,9 @@ bool series_value(const MeasuresAGo &m, ChartSeries series, float &out) {
   case ChartSeries::Humidity:
     out = m.temp_hum_a.humidity;
     return m.temp_hum_a.humidity != MeasuresInvalid::HUMIDITY;
-  case ChartSeries::Tvoc:
-    out = static_cast<float>(m.tvoc_nox.tvoc_index);
-    return m.tvoc_nox.is_tvoc_index_valid() && m.tvoc_nox.tvoc_index <= CHART_GAS_INDEX_MAX;
+  case ChartSeries::Pm1:
+    out = m.pm_a.pm_01;
+    return m.pm_a.pm_01 != MeasuresInvalid::PM;
   case ChartSeries::Pm10:
     out = m.pm_a.pm_10;
     return m.pm_a.pm_10 != MeasuresInvalid::PM;

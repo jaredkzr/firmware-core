@@ -31,7 +31,7 @@ BthomeReadings full_readings() {
   r.pm10_ugm3 = 18.4f;
   r.co2_ppm = 615;
   r.humidity_pct = 45.5f;
-  r.tvoc_index = 120;
+  r.pm1_ugm3 = 7.6f;
   return r;
 }
 
@@ -48,7 +48,7 @@ TEST_CASE("BTHome: all readings fit the legacy payload", "[BTHome]") {
       0x0E, 0x12, 0x00,             // PM10 18 µg/m³
       0x12, 0x67, 0x02,             // CO2 615 ppm
       0x2E, 0x2E,                   // humidity 46 %
-      0x3D, 0x78, 0x00,             // count uint16: TVOC index 120
+      0x3D, 0x08, 0x00,             // count uint16: PM1.0 8 µg/m³
   };
   const auto adv = encode(full_readings(), 7);
   CHECK(adv == expected);
@@ -111,8 +111,8 @@ TEST_CASE("BTHome: readings take only validated fields", "[BTHome]") {
   m.pm_a.pm_25 = 4.0f;
   m.pm_a.pm_10 = 6.5f;
   m.co2.co2 = 20000; // out of range
-  m.tvoc_nox.tvoc_index = 100;
-  m.tvoc_nox.nox_index = 25000; // raw ticks, not an index
+  m.pm_a.pm_01 = 2.5f;
+  m.tvoc_nox.tvoc_index = 100; // not broadcast
 
   const BthomeReadings r = bthome_readings_from(m, 64.0f);
   CHECK(r.temperature_c == 21.5f);
@@ -120,7 +120,7 @@ TEST_CASE("BTHome: readings take only validated fields", "[BTHome]") {
   CHECK(r.pm25_ugm3 == 4.0f);
   CHECK(r.pm10_ugm3 == 6.5f);
   CHECK(r.co2_ppm == MeasuresInvalid::CO2);
-  CHECK(r.tvoc_index == 100);
+  CHECK(r.pm1_ugm3 == 2.5f);
   CHECK(r.battery_pct == 64.0f);
 
   CHECK(bthome_readings_from(m, MeasuresInvalid::BATTERY_PERCENT).battery_pct ==

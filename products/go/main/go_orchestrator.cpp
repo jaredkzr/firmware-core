@@ -245,7 +245,7 @@ void Orchestrator::init(WakeCause cause, const BootHandoff &handoff) {
     _corrected_measures.pm_a.pm_25 = handoff.display_snapshot->pm25_ugm3;
     _corrected_measures.temp_hum_a.temperature = handoff.display_snapshot->temperature_c;
     _corrected_measures.temp_hum_a.humidity = handoff.display_snapshot->humidity_pct;
-    _corrected_measures.tvoc_nox.tvoc_index = handoff.display_snapshot->tvoc_index;
+    _corrected_measures.pm_a.pm_01 = handoff.display_snapshot->pm1_ugm3;
     _corrected_measures.pm_a.pm_10 = handoff.display_snapshot->pm10_ugm3;
     _corrected_measures.pressure.pressure = handoff.display_snapshot->pressure_hpa;
     _corrected_measures.pressure.altitude = handoff.display_snapshot->altitude_m;

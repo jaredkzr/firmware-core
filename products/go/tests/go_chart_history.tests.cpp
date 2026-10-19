@@ -61,7 +61,7 @@ TEST_CASE("ChartHistory", "[ChartHistory]") {
     REQUIRE(h.read(ChartSeries::Co2, T0, 0, out, 1).count == 1);
     CHECK(out[0] == Catch::Approx(612.0f));
     // Fields not measured have no history.
-    CHECK(h.read(ChartSeries::Tvoc, T0, 0, out, 1).count == 0);
+    CHECK(h.read(ChartSeries::Pm1, T0, 0, out, 1).count == 0);
   }
 
   SECTION("short gaps are bridged, long gaps stay NaN") {
@@ -133,11 +133,12 @@ TEST_CASE("ChartHistory", "[ChartHistory]") {
     CHECK(h.read(ChartSeries::Pm25, T0 - 1, 0, out, CHART_HISTORY_BUCKETS).count == 0);
   }
 
-  SECTION("gas index values above 500 are not charted") {
+  SECTION("PM1.0 is charted at 0.1 ug/m3") {
     MeasuresAGo m{};
-    m.tvoc_nox.tvoc_index = 29806;
+    m.pm_a.pm_01 = 4.2f;
     h.record(m, T0);
-    CHECK(h.read(ChartSeries::Tvoc, T0, 0, out, 1).count == 0);
+    REQUIRE(h.read(ChartSeries::Pm1, T0, 0, out, 1).count == 1);
+    CHECK(out[0] == Catch::Approx(4.2f));
   }
 
   SECTION("PM10 is charted at 0.1 ug/m3") {

@@ -7157,7 +7157,7 @@ TEST_CASE("init(Button, display_painted + snapshot): backward-compatible with bu
   snapshot.pm25_ugm3 = 12.5f;
   snapshot.temperature_c = 21.0f;
   snapshot.humidity_pct = 55.0f;
-  snapshot.tvoc_index = 100;
+  snapshot.pm1_ugm3 = 7.5f;
   snapshot.pm10_ugm3 = 18.5f;
   snapshot.pressure_hpa = 1013.25f;
   snapshot.altitude_m = 110.0f;
@@ -7178,7 +7178,7 @@ TEST_CASE("init(Button, display_painted + snapshot): backward-compatible with bu
   CHECK(A::corrected_measures(orch).pm_a.pm_25 == 12.5f);
   CHECK(A::corrected_measures(orch).temp_hum_a.temperature == 21.0f);
   CHECK(A::corrected_measures(orch).temp_hum_a.humidity == 55.0f);
-  CHECK(A::corrected_measures(orch).tvoc_nox.tvoc_index == 100);
+  CHECK(A::corrected_measures(orch).pm_a.pm_01 == 7.5f);
   CHECK(A::corrected_measures(orch).pm_a.pm_10 == 18.5f);
   CHECK(A::corrected_measures(orch).pressure.pressure == 1013.25f);
   CHECK(A::corrected_measures(orch).pressure.altitude == 110.0f);

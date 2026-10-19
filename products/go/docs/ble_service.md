@@ -120,15 +120,16 @@ With every reading valid the payload is 29 of the 31 legacy bytes:
 | `0E <u16>` | PM10, ug/m3 |
 | `12 <u16>` | CO2, ppm |
 | `2E <u8>` | Humidity, % |
-| `3D <u16>` | Count: TVOC index |
+| `3D <u16>` | Count: PM1.0, ug/m3 |
 
 Values are the corrected (displayed) readings, since a listener cannot apply
 the correction settings. Invalid fields are omitted and the service-data
-length shrinks to match. BTHome has no gas-index object, so the TVOC index uses
-a count object, which Home Assistant shows as a count sensor. NOx is not
-broadcast, and Portable Sleep measurement wakes leave the SGP41 off, so TVOC
-is only present while a phone keeps the Go awake (see
-[Portable Sleep](power_management.md#portable-sleep)).
+length shrinks to match. BTHome has no PM1.0 object, so PM1.0 uses the uint16
+count object (Home Assistant shows it as a count sensor); Go Live and the
+kizer.sh viewer decode it as PM1.0. TVOC and NOx are not broadcast, since
+Portable Sleep measurement wakes leave the SGP41 off (see
+[Portable Sleep](power_management.md#portable-sleep)); a connected phone
+still gets them over GATT.
 
 Each new measurement is recorded in RTC memory with `save_rtc_bthome()`
 (orchestrator `on_sensor_data()`, and the fast-path measurement wake), which
