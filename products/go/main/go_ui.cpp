@@ -133,7 +133,7 @@ static constexpr uint32_t SNACKBAR_PENDING = UINT32_MAX;
 /// Selectable metrics in on-screen order: hero blocks, then the grid rows.
 static constexpr Metric METRIC_CYCLE[] = {
     Metric::None, Metric::Pm25, Metric::Co2,      Metric::Temp,     Metric::Humidity,
-    Metric::Tvoc, Metric::Nox,  Metric::Pressure, Metric::Altitude,
+    Metric::Tvoc, Metric::Pm10, Metric::Pressure, Metric::Altitude,
 };
 static constexpr uint8_t METRIC_CYCLE_LEN = sizeof(METRIC_CYCLE) / sizeof(METRIC_CYCLE[0]);
 
@@ -319,7 +319,7 @@ DisplayValues UIManager::build_values(const BuildContext &ctx) const {
   v.temperature_c = ctx.sensor_data.temp_hum_a.temperature;
   v.humidity_pct = ctx.sensor_data.temp_hum_a.humidity;
   v.tvoc_index = ctx.sensor_data.tvoc_nox.tvoc_index;
-  v.nox_index = ctx.sensor_data.tvoc_nox.nox_index;
+  v.pm10_ugm3 = ctx.sensor_data.pm_a.pm_10;
   v.pressure_hpa = ctx.sensor_data.pressure.pressure;
   v.altitude_m = ctx.sensor_data.pressure.altitude;
 
@@ -966,8 +966,7 @@ void UIManager::browse_metric(int delta) {
   // when unlocked.  When unlocked the dashboard is always visible
   // (display_off is suppressed by the orchestrator), so browsing is valid.
   //
-  // Cycle through 5 selectable entries: None, Pm25, Co2, Temp, Humidity.
-  // TVOC and NOx remain in the enum but are not selectable.
+  // Cycle through METRIC_CYCLE: None, the hero blocks, then the grid rows.
   int idx = 0;
   for (int i = 0; i < METRIC_CYCLE_LEN; ++i) {
     if (METRIC_CYCLE[i] == _active_metric) {
@@ -2251,8 +2250,8 @@ void UIManager::populate_chart(DisplayValues &v, const BuildContext &ctx) const 
   case Metric::Tvoc:
     series = ChartSeries::Tvoc;
     break;
-  case Metric::Nox:
-    series = ChartSeries::Nox;
+  case Metric::Pm10:
+    series = ChartSeries::Pm10;
     break;
   case Metric::Pressure:
     series = ChartSeries::Pressure;

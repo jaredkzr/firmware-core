@@ -296,7 +296,7 @@ factory-state write and reboot path.
 
 | Screen | Style | Wrapping | Scroll |
 |---|---|---|---|
-| Home (metrics) | Circular cycle (9 entries: None, Pm25, Co2, Temp, Humidity, Tvoc, Nox, Pressure, Altitude) | Yes | N/A |
+| Home (metrics) | Circular cycle (9 entries: None, Pm25, Co2, Temp, Humidity, Tvoc, Pm10, Pressure, Altitude) | Yes | N/A |
 | MainMenu | Circular (4 rows, all always enabled) | Yes | N/A |
 | TrackingMenu | Circular (5 rows) | Yes | None |
 | TrackingStatus | Circular (3 selectable rows, 6 informational rows) | Yes | None; Session/GPS view switch |
@@ -486,5 +486,5 @@ chart buffer holds `UI_CHART_BUF_SIZE` (= `CHART_HISTORY_BUCKETS`, 120) values.
 the retained clock once per context, and only when a chart or Tracking Status
 needs it.
 
-TVOC and NOx charts plot only gas-index values (0 to `CHART_GAS_INDEX_MAX`,
+TVOC charts plot only gas-index values (0 to `CHART_GAS_INDEX_MAX`,
 500); larger values are raw SRAW ticks. Clear Data empties the history.

@@ -259,6 +259,7 @@ int decide_sleep_call_count = 0;
 bool last_decide_sleep_ble_link = false;
 int led_shutdown_count = 0;
 int sensor_idle_for_sleep_count = 0;
+int sensor_gas_heater_off_count = 0;
 bool pm_power_set = false;
 bool pm_power_on = false;
 uint32_t pm_power_set_count = 0;
@@ -463,6 +464,7 @@ void reset() {
   last_decide_sleep_ble_link = false;
   led_shutdown_count = 0;
   sensor_idle_for_sleep_count = 0;
+  sensor_gas_heater_off_count = 0;
   pm_power_set = false;
   pm_power_on = false;
   pm_power_set_count = 0;
@@ -505,6 +507,7 @@ void SensorProducer::stop(bool sleep_pm) {
 }
 
 void SensorProducer::idle_sensors_for_sleep() { ++test_spy::sensor_idle_for_sleep_count; }
+void SensorProducer::tvoc_nox_heater_off_for_sleep() { ++test_spy::sensor_gas_heater_off_count; }
 
 bool SensorProducer::tvoc_nox_index_state(TvocNoxIndexState & /*out*/) const { return false; }
 

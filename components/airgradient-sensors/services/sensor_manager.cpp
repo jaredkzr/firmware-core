@@ -186,6 +186,17 @@ void SensorManager::idle_for_sleep() {
           idle_outcome(_sensors.pressure != nullptr, pressure_ok));
 }
 
+bool SensorManager::tvoc_nox_heater_off() {
+  if (!_sensors.tvoc_nox) {
+    return true;
+  }
+  if (!_sensors.tvoc_nox->heater_off()) {
+    AG_LOGW(TAG, "TVOC/NOx heater_off failed");
+    return false;
+  }
+  return true;
+}
+
 Co2CalibrationResult SensorManager::calibrate_co2() {
   if (!_sensors.co2 || !_sensors.co2->supports_calibration()) {
     return Co2CalibrationResult::Unsupported;

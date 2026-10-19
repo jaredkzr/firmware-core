@@ -68,6 +68,8 @@ extern RtcAppState rtc_state;
 extern RtcDisplaySnapshot rtc_snapshot;
 extern bool rtc_snapshot_valid;
 extern int warmup_step_count;
+extern int warmup_gas_condition_count;
+extern SensorGroup last_measure_groups;
 extern int pm_sleep_count;
 extern int idle_for_sleep_count;
 extern OperatingMode last_decide_sleep_mode;
@@ -1077,7 +1079,7 @@ TEST_CASE("build_fast_path_display: invalid sensors -> sentinels preserved") {
   CHECK(v.temperature_c == MeasuresInvalid::TEMPERATURE);
   CHECK(v.humidity_pct == MeasuresInvalid::HUMIDITY);
   CHECK(v.tvoc_index == MeasuresInvalid::TVOC);
-  CHECK(v.nox_index == MeasuresInvalid::NOX);
+  CHECK(v.pm10_ugm3 == MeasuresInvalid::PM);
   CHECK(v.pressure_hpa == MeasuresInvalid::PRESSURE);
   CHECK(v.altitude_m == MeasuresInvalid::ALTITUDE);
   CHECK(v.battery_pct == 0xFF); // no battery data
@@ -1171,7 +1173,7 @@ TEST_CASE("RTC snapshot round-trips a fast-path frame exactly") {
   CHECK(rebuilt.temperature_c == painted.temperature_c);
   CHECK(rebuilt.humidity_pct == painted.humidity_pct);
   CHECK(rebuilt.tvoc_index == painted.tvoc_index);
-  CHECK(rebuilt.nox_index == painted.nox_index);
+  CHECK(rebuilt.pm10_ugm3 == painted.pm10_ugm3);
   CHECK(rebuilt.pressure_hpa == painted.pressure_hpa);
   CHECK(rebuilt.altitude_m == painted.altitude_m);
   CHECK(rebuilt.battery_pct == painted.battery_pct);
@@ -1262,6 +1264,7 @@ TEST_CASE("execute_fast_path: cold sensors full warmup, measure, sleep") {
   GoAppTestAccess access(app);
 
   RtcAppState state{};
+  state.mode = OperatingMode::Offline;
   state.set_flag(RtcAppFlag::SensorsWarm, false);
   volatile bool button = false;
 
@@ -1275,6 +1278,34 @@ TEST_CASE("execute_fast_path: cold sensors full warmup, measure, sleep") {
   CHECK(test_spy::idle_for_sleep_count == 1); // CO2/TVOC/pressure idled for the window
   // Warmup iterations should have been called
   CHECK(test_spy::warmup_step_count > 0);
+  // Offline conditions and reads the SGP41.
+  CHECK(test_spy::warmup_gas_condition_count == test_spy::warmup_step_count);
+  CHECK(test_spy::last_measure_groups == SensorGroup::All);
+}
+
+TEST_CASE("execute_fast_path: Portable Sleep leaves the SGP41 off") {
+  test_spy::reset();
+  test_spy::sleep_decision_to_return = {PowerService::SleepType::Deep, 30000};
+  test_spy::should_hold_pm_result = false;
+
+  MockBoard board;
+  GoApp app(board);
+  GoAppTestAccess access(app);
+
+  RtcAppState state{};
+  state.mode = OperatingMode::Portable;
+  state.set_flag(RtcAppFlag::SensorsWarm, false);
+  volatile bool button = false;
+
+  auto result = access.execute_fast_path(state, button);
+
+  CHECK(result.outcome == GoAppTestAccess::Outcome::Sleep);
+  CHECK(result.has_measures == true);
+  CHECK(test_spy::warmup_step_count > 0);
+  CHECK(test_spy::warmup_gas_condition_count == 0);
+  CHECK(test_spy::last_measure_groups ==
+        static_cast<SensorGroup>(static_cast<uint8_t>(SensorGroup::PM) |
+                                 static_cast<uint8_t>(SensorGroup::Other)));
 }
 
 TEST_CASE("execute_fast_path: raw TVOC/NOx ticks never become the index") {

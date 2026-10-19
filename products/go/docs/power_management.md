@@ -209,12 +209,19 @@ central connected follows the same deep-sleep cycle as Offline mode:
   the button-wake path, which paints the RTC snapshot unlocked and then brings
   BLE up in `Orchestrator::init()`. A bonded phone reconnects while the device
   is unlocked, which keeps it awake
-- **TVOC/NOx index:** the Sensirion algorithm state is kept in RTC memory
-  (`go_gas_index_rtc`), so each fast-path wake feeds it one sample, retimed to
-  the real gap since the previous one. The index keeps its learned baseline
-  across sleeps; only the first sample of a fresh algorithm (power-on, or a gap
-  over `GAS_INDEX_RESUME_MAX_GAP_S`, 1 h) falls in the blackout and shows "-".
-  Offline mode benefits the same way
+- **TVOC/NOx:** Portable Sleep wakes leave the SGP41 off (no conditioning,
+  no read), because heating it for TVOC heats the NOx pixel too. TVOC and NOx
+  are measured only while the device is awake, such as with a phone connected,
+  and show "-" on sleep wakes. Sleep entry switches the SGP41 heater off even
+  when the other sensors are held warm, and saves the gas-index state; a phone
+  connection within `GAS_INDEX_RESUME_MAX_GAP_S` (1 h) resumes its baseline,
+  later ones start a fresh algorithm
+- **Offline gas index:** Offline mode still measures the SGP41 on each wake.
+  The Sensirion algorithm state is kept in RTC memory (`go_gas_index_rtc`), so
+  each fast-path wake feeds it one sample, retimed to the real gap since the
+  previous one. The index keeps its learned baseline across sleeps; only the
+  first sample of a fresh algorithm (power-on, or a gap over 1 h) falls in the
+  blackout and shows "-"
 
 ### Connect windows
 

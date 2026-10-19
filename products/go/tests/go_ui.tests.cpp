@@ -518,7 +518,7 @@ TEST_CASE("UIManager: metric cycling on Home", "[UIManager][metric]") {
     press(ui, InputSource::TouchDown);
     check_metric(Metric::Tvoc);
     press(ui, InputSource::TouchDown);
-    check_metric(Metric::Nox);
+    check_metric(Metric::Pm10);
     press(ui, InputSource::TouchDown);
     check_metric(Metric::Pressure);
     press(ui, InputSource::TouchDown);

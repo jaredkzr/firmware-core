@@ -246,7 +246,7 @@ void Orchestrator::init(WakeCause cause, const BootHandoff &handoff) {
     _corrected_measures.temp_hum_a.temperature = handoff.display_snapshot->temperature_c;
     _corrected_measures.temp_hum_a.humidity = handoff.display_snapshot->humidity_pct;
     _corrected_measures.tvoc_nox.tvoc_index = handoff.display_snapshot->tvoc_index;
-    _corrected_measures.tvoc_nox.nox_index = handoff.display_snapshot->nox_index;
+    _corrected_measures.pm_a.pm_10 = handoff.display_snapshot->pm10_ugm3;
     _corrected_measures.pressure.pressure = handoff.display_snapshot->pressure_hpa;
     _corrected_measures.pressure.altitude = handoff.display_snapshot->altitude_m;
   }
@@ -3497,6 +3497,10 @@ void Orchestrator::prepare_for_sleep(uint32_t sleep_duration_ms) {
     // Cold sleep: the next wake re-initializes every sensor, so idle the
     // always-powered ones instead of letting them measure through the sleep.
     _svc.sensor_producer.idle_sensors_for_sleep();
+  } else if (_mode == OperatingMode::Portable) {
+    // Portable Sleep wakes never read the SGP41 (TVOC/NOx are measured only
+    // while awake), so a warm hold must not leave its hotplate on.
+    _svc.sensor_producer.tvoc_nox_heater_off_for_sleep();
   }
 
   // Keep GNSS tracking only when the next fast-path wake reads it (an active

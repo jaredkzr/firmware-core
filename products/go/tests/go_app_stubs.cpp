@@ -44,6 +44,8 @@ bool rtc_snapshot_valid = false;
 
 // --- SensorManager ---
 int warmup_step_count = 0;
+int warmup_gas_condition_count = 0;
+SensorGroup last_measure_groups = SensorGroup::None;
 int pm_sleep_count = 0;
 int idle_for_sleep_count = 0;
 Measures measures_to_return{};
@@ -162,6 +164,8 @@ void reset() {
   rtc_snapshot_valid = false;
 
   warmup_step_count = 0;
+  warmup_gas_condition_count = 0;
+  last_measure_groups = SensorGroup::None;
   pm_sleep_count = 0;
   idle_for_sleep_count = 0;
   measures_to_return = Measures{};
@@ -327,7 +331,12 @@ LocalServer::~LocalServer() = default;
 SensorManager::SensorManager(Sensors &sensors) : _sensors(sensors) {}
 SensorManager::~SensorManager() = default;
 
-void SensorManager::warmup_step(bool /*condition_gas*/) { test_spy::warmup_step_count++; }
+void SensorManager::warmup_step(bool condition_gas) {
+  test_spy::warmup_step_count++;
+  if (condition_gas) {
+    test_spy::warmup_gas_condition_count++;
+  }
+}
 void SensorManager::warmup() {}
 void SensorManager::pm_sleep() { test_spy::pm_sleep_count++; }
 void SensorManager::idle_for_sleep() { test_spy::idle_for_sleep_count++; }
@@ -368,7 +377,8 @@ bool SensorManager::set_tvoc_nox_sampling_interval(uint32_t /*sampling_interval_
   return false;
 }
 
-Measures SensorManager::start_measures(int /*iterations*/, SensorGroup /*groups*/) {
+Measures SensorManager::start_measures(int /*iterations*/, SensorGroup groups) {
+  test_spy::last_measure_groups = groups;
   return test_spy::measures_to_return;
 }
 

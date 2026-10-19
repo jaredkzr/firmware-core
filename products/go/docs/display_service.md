@@ -111,7 +111,7 @@ struct RtcDisplaySnapshot {
   // Sensor values
   int   co2_ppm;          float pm25_ugm3;
   float temperature_c;    float humidity_pct;
-  int   tvoc_index;       int   nox_index;
+  int   tvoc_index;       float pm10_ugm3;
   float pressure_hpa;     float altitude_m;
   // Battery
   uint8_t battery_pct;  bool is_battery_charging;  bool is_plugged_in;
@@ -186,7 +186,7 @@ internally to select the refresh tier (Full/Fast/Partial).
 
 Key points:
 
-- TVOC/NOx are `int` (SGP41 algorithm index output, not raw resistance)
+- TVOC is an `int` (SGP41 algorithm index output, not raw resistance)
 - Sensor readings come from channel A (`pm_a`, `temp_hum_a`)
 - `ListRow::text` is `char[48]` (owned by struct, not a pointer)
 - `is_plugged_in` (`bool`): true when the charger reports external USB input; drives the plug icon in the status bar
@@ -578,12 +578,13 @@ Screen dispatch:
   directly by `FgLearningRunner` (no `UIManager`). See
   [`fg_learning.md`](fg_learning.md).
 - **Home:** Hero blocks (PM2.5, CO2 with dual-font labels centered via
-  `u8g2_GetStrWidth()`) + 3-row grid (Temp/Humidity, TVOC/NOx,
+  `u8g2_GetStrWidth()`) + 3-row grid (Temp/Humidity, TVOC/PM10,
   Pressure/Altitude). Grid dividers span full 128 px; the 1st divider is
   always 2 px thick. Selecting any metric (PM2.5, CO2, Temperature, Humidity,
-  TVOC, NOx, Pressure, Altitude) replaces all three grid rows with a chart
+  TVOC, PM10, Pressure, Altitude) replaces all three grid rows with a chart
   panel: an inverted title band (y=164..180) with the metric name (PM2.5 and
-  CO2 include their unit, `(ug/m3)`/`(USAQI)` and `(ppm)`) and current value,
+  CO2 include their unit, `(ug/m3)`/`(USAQI)` and `(ppm)`; PM10 is always
+  `(ug/m3)`) and current value,
   a Min/Max line (values without units; the title carries the unit), a 40 px
   plot (y=199..238), and a time axis at baseline y=248: the oldest plotted
   sample's age on the left (up to `-4h`) and the newest on the right (`now`
@@ -683,7 +684,8 @@ with a full-canvas Partial (no flash).
 | CO2 | Integer ppm; >9999: "9999+" |
 | Temperature | One decimal, C or F; conversion: `F = C * 9/5 + 32` |
 | Humidity | Integer percent |
-| TVOC/NOx | Integer (index values) |
+| PM10 | As PM2.5 in ug/m3; no USAQI (the Go has no PM10 AQI) |
+| TVOC | Integer (index value) |
 | Pressure | Integer hPa; >9999: "9999+ hPa" |
 | Altitude | Integer meters by default; `use_feet` converts with `m × 3.28084` and renders the full rounded value with `ft`; meters >9999 render `9999+ m` |
 | Invalid | "-" for any metric |

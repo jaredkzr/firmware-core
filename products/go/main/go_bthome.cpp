@@ -42,10 +42,10 @@ constexpr uint8_t OBJ_PACKET_ID = 0x00;   // uint8
 constexpr uint8_t OBJ_BATTERY = 0x01;     // uint8, 1 %
 constexpr uint8_t OBJ_TEMPERATURE = 0x02; // sint16, 0.01 °C
 constexpr uint8_t OBJ_PM25 = 0x0D;        // uint16, 1 µg/m³
+constexpr uint8_t OBJ_PM10 = 0x0E;        // uint16, 1 µg/m³
 constexpr uint8_t OBJ_CO2 = 0x12;         // uint16, 1 ppm
 constexpr uint8_t OBJ_HUMIDITY = 0x2E;    // uint8, 1 %
 constexpr uint8_t OBJ_COUNT_U16 = 0x3D;   // uint16 — TVOC index
-constexpr uint8_t OBJ_COUNT_U32 = 0x3E;   // uint32 — NOx index
 
 constexpr float TEMPERATURE_SCALE = 100.0f;
 constexpr float PERCENT_MAX = 100.0f;
@@ -59,10 +59,6 @@ public:
   void u16(uint16_t v) {
     u8(static_cast<uint8_t>(v & 0xFF));
     u8(static_cast<uint8_t>(v >> 8));
-  }
-  void u32(uint32_t v) {
-    u16(static_cast<uint16_t>(v & 0xFFFF));
-    u16(static_cast<uint16_t>(v >> 16));
   }
   size_t len() const { return _len; }
   void patch(size_t at, uint8_t v) { _out[at] = v; }
@@ -83,7 +79,7 @@ uint32_t round_clamped(float v, float max) {
 bool is_gas_index_valid(int index) { return index >= 0 && index <= BTHOME_GAS_INDEX_MAX; }
 
 // Bump when BthomeReadings' layout changes.
-constexpr uint32_t RTC_BTHOME_MAGIC = 0x42544801; // "BTH" v1
+constexpr uint32_t RTC_BTHOME_MAGIC = 0x42544802; // "BTH" v2
 
 struct RtcBthome {
   uint32_t magic;
@@ -120,15 +116,15 @@ BthomeReadings bthome_readings_from(const MeasuresAGo &corrected, float battery_
   if (corrected.pm_a.is_pm_25_valid()) {
     r.pm25_ugm3 = corrected.pm_a.pm_25;
   }
+  if (corrected.pm_a.is_pm_10_valid()) {
+    r.pm10_ugm3 = corrected.pm_a.pm_10;
+  }
   if (corrected.co2.is_valid()) {
     r.co2_ppm = corrected.co2.co2;
   }
   if (corrected.tvoc_nox.is_tvoc_index_valid() &&
       is_gas_index_valid(corrected.tvoc_nox.tvoc_index)) {
     r.tvoc_index = corrected.tvoc_nox.tvoc_index;
-  }
-  if (corrected.tvoc_nox.is_nox_index_valid() && is_gas_index_valid(corrected.tvoc_nox.nox_index)) {
-    r.nox_index = corrected.tvoc_nox.nox_index;
   }
   MeasuresPower power{};
   power.battery_percentage = battery_pct;
@@ -140,8 +136,8 @@ BthomeReadings bthome_readings_from(const MeasuresAGo &corrected, float battery_
 
 size_t encode_bthome_adv(const BthomeReadings &r, uint8_t packet_id, uint8_t *out,
                          size_t out_size) {
-  // Every object present fills the legacy payload exactly, so a buffer of
-  // that size always fits.
+  // Every object present takes 29 of the legacy payload's 31 bytes, so a
+  // buffer of that size always fits.
   if (out == nullptr || out_size < BTHOME_ADV_MAX_LEN) {
     return 0;
   }
@@ -151,6 +147,7 @@ size_t encode_bthome_adv(const BthomeReadings &r, uint8_t packet_id, uint8_t *ou
   temp_hum.humidity = r.humidity_pct;
   PMData pm{};
   pm.pm_25 = r.pm25_ugm3;
+  pm.pm_10 = r.pm10_ugm3;
   CO2Data co2{};
   co2.co2 = r.co2_ppm;
   MeasuresPower power{};
@@ -182,6 +179,10 @@ size_t encode_bthome_adv(const BthomeReadings &r, uint8_t packet_id, uint8_t *ou
     w.u8(OBJ_PM25);
     w.u16(static_cast<uint16_t>(round_clamped(r.pm25_ugm3, UINT16_MAX)));
   }
+  if (pm.is_pm_10_valid()) {
+    w.u8(OBJ_PM10);
+    w.u16(static_cast<uint16_t>(round_clamped(r.pm10_ugm3, UINT16_MAX)));
+  }
   if (co2.is_valid()) {
     w.u8(OBJ_CO2);
     w.u16(static_cast<uint16_t>(r.co2_ppm));
@@ -193,10 +194,6 @@ size_t encode_bthome_adv(const BthomeReadings &r, uint8_t packet_id, uint8_t *ou
   if (is_gas_index_valid(r.tvoc_index)) {
     w.u8(OBJ_COUNT_U16);
     w.u16(static_cast<uint16_t>(r.tvoc_index));
-  }
-  if (is_gas_index_valid(r.nox_index)) {
-    w.u8(OBJ_COUNT_U32);
-    w.u32(static_cast<uint32_t>(r.nox_index));
   }
 
   // AD length counts the type byte and everything after it.
