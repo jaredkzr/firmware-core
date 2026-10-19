@@ -45,7 +45,7 @@ constexpr uint8_t OBJ_PM25 = 0x0D;        // uint16, 1 µg/m³
 constexpr uint8_t OBJ_PM10 = 0x0E;        // uint16, 1 µg/m³
 constexpr uint8_t OBJ_CO2 = 0x12;         // uint16, 1 ppm
 constexpr uint8_t OBJ_HUMIDITY = 0x2E;    // uint8, 1 %
-constexpr uint8_t OBJ_COUNT_U16 = 0x3D;   // uint16 — TVOC index
+constexpr uint8_t OBJ_COUNT_U16 = 0x3D;   // uint16 — PM1.0, 1 µg/m³ (no BTHome PM1.0 object)
 
 constexpr float TEMPERATURE_SCALE = 100.0f;
 constexpr float PERCENT_MAX = 100.0f;
@@ -76,10 +76,8 @@ uint32_t round_clamped(float v, float max) {
   return static_cast<uint32_t>(std::lround(v < max ? v : max));
 }
 
-bool is_gas_index_valid(int index) { return index >= 0 && index <= BTHOME_GAS_INDEX_MAX; }
-
 // Bump when BthomeReadings' layout changes.
-constexpr uint32_t RTC_BTHOME_MAGIC = 0x42544802; // "BTH" v2
+constexpr uint32_t RTC_BTHOME_MAGIC = 0x42544803; // "BTH" v3
 
 struct RtcBthome {
   uint32_t magic;
@@ -122,9 +120,8 @@ BthomeReadings bthome_readings_from(const MeasuresAGo &corrected, float battery_
   if (corrected.co2.is_valid()) {
     r.co2_ppm = corrected.co2.co2;
   }
-  if (corrected.tvoc_nox.is_tvoc_index_valid() &&
-      is_gas_index_valid(corrected.tvoc_nox.tvoc_index)) {
-    r.tvoc_index = corrected.tvoc_nox.tvoc_index;
+  if (corrected.pm_a.is_pm_01_valid()) {
+    r.pm1_ugm3 = corrected.pm_a.pm_01;
   }
   MeasuresPower power{};
   power.battery_percentage = battery_pct;
@@ -146,6 +143,7 @@ size_t encode_bthome_adv(const BthomeReadings &r, uint8_t packet_id, uint8_t *ou
   temp_hum.temperature = r.temperature_c;
   temp_hum.humidity = r.humidity_pct;
   PMData pm{};
+  pm.pm_01 = r.pm1_ugm3;
   pm.pm_25 = r.pm25_ugm3;
   pm.pm_10 = r.pm10_ugm3;
   CO2Data co2{};
@@ -191,9 +189,9 @@ size_t encode_bthome_adv(const BthomeReadings &r, uint8_t packet_id, uint8_t *ou
     w.u8(OBJ_HUMIDITY);
     w.u8(static_cast<uint8_t>(round_clamped(r.humidity_pct, PERCENT_MAX)));
   }
-  if (is_gas_index_valid(r.tvoc_index)) {
+  if (pm.is_pm_01_valid()) {
     w.u8(OBJ_COUNT_U16);
-    w.u16(static_cast<uint16_t>(r.tvoc_index));
+    w.u16(static_cast<uint16_t>(round_clamped(r.pm1_ugm3, UINT16_MAX)));
   }
 
   // AD length counts the type byte and everything after it.

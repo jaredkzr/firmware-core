@@ -822,28 +822,6 @@ void format_humidity_value(char *out, size_t out_size, float humidity) {
   snprintf(out, out_size, "%.0f %%", humidity);
 }
 
-// Integer index display for TVOC/NOx grid cells.
-void format_int_index_value(char *out, size_t out_size, int value) {
-  if (value < 0) {
-    snprintf(out, out_size, "-");
-    return;
-  }
-  snprintf(out, out_size, "%d", value);
-}
-
-// Float index display for chart min/max stats.
-void format_float_index_value(char *out, size_t out_size, float value) {
-  if (!is_float_non_negative(value)) {
-    snprintf(out, out_size, "-");
-    return;
-  }
-  if (fabsf(value - roundf(value)) < 0.05f) {
-    snprintf(out, out_size, "%.0f", value);
-    return;
-  }
-  format_one_decimal(out, out_size, value);
-}
-
 void format_pressure_value(char *out, size_t out_size, float pressure_hpa) {
   if (!is_float_non_negative(pressure_hpa)) {
     snprintf(out, out_size, "-");
@@ -913,11 +891,9 @@ void format_chart_stat(char *out, size_t out_size, Metric metric, float value, b
   case Metric::Humidity:
     format_humidity_value(out, out_size, value);
     break;
-  case Metric::Tvoc:
-    format_float_index_value(out, out_size, value);
-    break;
+  case Metric::Pm1:
   case Metric::Pm10:
-    // No PM10 US AQI on the Go: always ug/m3.
+    // No PM1.0/PM10 US AQI on the Go: always ug/m3.
     format_pm_value(out, out_size, value, false);
     break;
   case Metric::Pressure:
@@ -972,8 +948,8 @@ const char *chart_panel_title(Metric metric, bool pm_use_usaqi) {
     return "Temperature";
   case Metric::Humidity:
     return "Humidity";
-  case Metric::Tvoc:
-    return "TVOC";
+  case Metric::Pm1:
+    return "PM1.0 (ug/m3)";
   case Metric::Pm10:
     return "PM10 (ug/m3)";
   case Metric::Pressure:
@@ -1000,8 +976,8 @@ void format_chart_panel_value(char *out, size_t out_size, const DisplayValues &v
   case Metric::Humidity:
     format_humidity_value(out, out_size, v.humidity_pct);
     break;
-  case Metric::Tvoc:
-    format_int_index_value(out, out_size, v.tvoc_index);
+  case Metric::Pm1:
+    format_pm_value(out, out_size, v.pm1_ugm3, false);
     break;
   case Metric::Pm10:
     format_pm_value(out, out_size, v.pm10_ugm3, false);
@@ -1896,12 +1872,12 @@ void DisplayService::_draw_home(const DisplayValues &v) {
   draw_cell(&_u8g2, 0, "Temperature", temp_buf, true);
   draw_cell(&_u8g2, 1, "Humidity", hum_buf, false);
 
-  // Row 2: TVOC / PM10
-  char tvoc_buf[24];
+  // Row 2: PM1.0 / PM10
+  char pm1_buf[24];
   char pm10_buf[24];
-  format_int_index_value(tvoc_buf, sizeof(tvoc_buf), v.tvoc_index);
+  format_pm_value(pm1_buf, sizeof(pm1_buf), v.pm1_ugm3, false);
   format_pm_value(pm10_buf, sizeof(pm10_buf), v.pm10_ugm3, false);
-  draw_cell(&_u8g2, 2, "TVOC", tvoc_buf, false);
+  draw_cell(&_u8g2, 2, "PM1.0", pm1_buf, false);
   draw_cell(&_u8g2, 3, "PM10", pm10_buf, false);
 
   // Row 3: Pressure / Altitude

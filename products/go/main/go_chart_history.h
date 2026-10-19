@@ -27,16 +27,13 @@ inline constexpr uint16_t CHART_HISTORY_BUCKETS = 120;
 /// Time covered by a full history.
 inline constexpr uint32_t CHART_HISTORY_SPAN_S = CHART_HISTORY_BUCKET_S * CHART_HISTORY_BUCKETS;
 
-/// Highest valid TVOC index; larger values are raw ticks, not an index.
-inline constexpr int CHART_GAS_INDEX_MAX = 500;
-
 /// One chartable value per series, in recording order.
 enum class ChartSeries : uint8_t {
   Pm25,
   Co2,
   Temp,
   Humidity,
-  Tvoc,
+  Pm1,
   Pm10,
   Pressure,
   Altitude,

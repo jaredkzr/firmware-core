@@ -133,7 +133,7 @@ static constexpr uint32_t SNACKBAR_PENDING = UINT32_MAX;
 /// Selectable metrics in on-screen order: hero blocks, then the grid rows.
 static constexpr Metric METRIC_CYCLE[] = {
     Metric::None, Metric::Pm25, Metric::Co2,      Metric::Temp,     Metric::Humidity,
-    Metric::Tvoc, Metric::Pm10, Metric::Pressure, Metric::Altitude,
+    Metric::Pm1,  Metric::Pm10, Metric::Pressure, Metric::Altitude,
 };
 static constexpr uint8_t METRIC_CYCLE_LEN = sizeof(METRIC_CYCLE) / sizeof(METRIC_CYCLE[0]);
 
@@ -318,7 +318,7 @@ DisplayValues UIManager::build_values(const BuildContext &ctx) const {
   v.pm25_ugm3 = ctx.sensor_data.pm_a.pm_25;
   v.temperature_c = ctx.sensor_data.temp_hum_a.temperature;
   v.humidity_pct = ctx.sensor_data.temp_hum_a.humidity;
-  v.tvoc_index = ctx.sensor_data.tvoc_nox.tvoc_index;
+  v.pm1_ugm3 = ctx.sensor_data.pm_a.pm_01;
   v.pm10_ugm3 = ctx.sensor_data.pm_a.pm_10;
   v.pressure_hpa = ctx.sensor_data.pressure.pressure;
   v.altitude_m = ctx.sensor_data.pressure.altitude;
@@ -2247,8 +2247,8 @@ void UIManager::populate_chart(DisplayValues &v, const BuildContext &ctx) const 
   case Metric::Humidity:
     series = ChartSeries::Humidity;
     break;
-  case Metric::Tvoc:
-    series = ChartSeries::Tvoc;
+  case Metric::Pm1:
+    series = ChartSeries::Pm1;
     break;
   case Metric::Pm10:
     series = ChartSeries::Pm10;

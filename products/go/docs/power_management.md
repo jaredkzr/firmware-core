@@ -212,7 +212,8 @@ central connected follows the same deep-sleep cycle as Offline mode:
 - **TVOC/NOx:** Portable Sleep wakes leave the SGP41 off (no conditioning,
   no read), because heating it for TVOC heats the NOx pixel too. TVOC and NOx
   are measured only while the device is awake, such as with a phone connected,
-  and show "-" on sleep wakes. Sleep entry switches the SGP41 heater off even
+  and reach the phone over GATT; the display and the BTHome broadcast show
+  PM1.0 in TVOC's place instead. Sleep entry switches the SGP41 heater off even
   when the other sensors are held warm, and saves the gas-index state; a phone
   connection within `GAS_INDEX_RESUME_MAX_GAP_S` (1 h) resumes its baseline,
   later ones start a fresh algorithm

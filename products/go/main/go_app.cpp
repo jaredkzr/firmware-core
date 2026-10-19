@@ -811,10 +811,10 @@ void GoApp::run_button_wake_path(const RtcAppState &state) {
 
   AG_LOGI(TAG,
           "button_wake: snapshot_valid=%d co2=%d pm25=%.1f temp=%.1f hum=%.1f "
-          "tvoc=%d pm10=%.1f pres=%.1f alt=%.1f batt=%d charging=%d "
+          "pm1=%.1f pm10=%.1f pres=%.1f alt=%.1f batt=%d charging=%d "
           "gps_en=%d gps_fix=%d tracking=%d ble=%d fahrenheit=%d feet=%d usaqi=%d",
           snapshot_valid, snapshot.co2_ppm, snapshot.pm25_ugm3, snapshot.temperature_c,
-          snapshot.humidity_pct, snapshot.tvoc_index, snapshot.pm10_ugm3, snapshot.pressure_hpa,
+          snapshot.humidity_pct, snapshot.pm1_ugm3, snapshot.pm10_ugm3, snapshot.pressure_hpa,
           snapshot.altitude_m, snapshot.battery_pct, snapshot.is_battery_charging,
           snapshot.gps_enabled, snapshot.gps_fix, static_cast<int>(snapshot.tracking_state),
           snapshot.ble_enabled, snapshot.use_fahrenheit, snapshot.use_feet, snapshot.pm_use_usaqi);
@@ -1319,8 +1319,8 @@ DisplayValues build_fast_path_display(const MeasuresAGo &measures, const GpsData
   if (corrected.temp_hum_a.is_hum_valid()) {
     v.humidity_pct = corrected.temp_hum_a.humidity;
   }
-  if (corrected.tvoc_nox.is_tvoc_index_valid()) {
-    v.tvoc_index = corrected.tvoc_nox.tvoc_index;
+  if (corrected.pm_a.is_pm_01_valid()) {
+    v.pm1_ugm3 = corrected.pm_a.pm_01;
   }
   if (corrected.pm_a.is_pm_10_valid()) {
     v.pm10_ugm3 = corrected.pm_a.pm_10;

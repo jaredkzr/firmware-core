@@ -59,7 +59,7 @@ enum class Metric : uint8_t {
   Co2,
   Temp,
   Humidity,
-  Tvoc,
+  Pm1,
   Pm10,
   Pressure,
   Altitude,
@@ -116,7 +116,7 @@ struct DisplayValues {
   float pm25_ugm3 = MeasuresInvalid::PM;
   float temperature_c = MeasuresInvalid::TEMPERATURE;
   float humidity_pct = MeasuresInvalid::HUMIDITY;
-  int tvoc_index = MeasuresInvalid::TVOC;
+  float pm1_ugm3 = MeasuresInvalid::PM;
   float pm10_ugm3 = MeasuresInvalid::PM;
   float pressure_hpa = MeasuresInvalid::PRESSURE;
   float altitude_m = MeasuresInvalid::ALTITUDE;
@@ -229,7 +229,7 @@ struct RtcDisplaySnapshot {
   float pm25_ugm3;
   float temperature_c;
   float humidity_pct;
-  int tvoc_index;
+  float pm1_ugm3;
   float pm10_ugm3;
   float pressure_hpa;
   float altitude_m;
@@ -259,7 +259,7 @@ inline RtcDisplaySnapshot snapshot_from_display_values(const DisplayValues &valu
   s.pm25_ugm3 = values.pm25_ugm3;
   s.temperature_c = values.temperature_c;
   s.humidity_pct = values.humidity_pct;
-  s.tvoc_index = values.tvoc_index;
+  s.pm1_ugm3 = values.pm1_ugm3;
   s.pm10_ugm3 = values.pm10_ugm3;
   s.pressure_hpa = values.pressure_hpa;
   s.altitude_m = values.altitude_m;
@@ -287,7 +287,7 @@ inline DisplayValues display_values_from_snapshot(const RtcDisplaySnapshot &snap
   v.pm25_ugm3 = snapshot.pm25_ugm3;
   v.temperature_c = snapshot.temperature_c;
   v.humidity_pct = snapshot.humidity_pct;
-  v.tvoc_index = snapshot.tvoc_index;
+  v.pm1_ugm3 = snapshot.pm1_ugm3;
   v.pm10_ugm3 = snapshot.pm10_ugm3;
   v.pressure_hpa = snapshot.pressure_hpa;
   v.altitude_m = snapshot.altitude_m;

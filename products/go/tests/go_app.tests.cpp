@@ -1078,7 +1078,7 @@ TEST_CASE("build_fast_path_display: invalid sensors -> sentinels preserved") {
   CHECK(v.pm25_ugm3 == MeasuresInvalid::PM);
   CHECK(v.temperature_c == MeasuresInvalid::TEMPERATURE);
   CHECK(v.humidity_pct == MeasuresInvalid::HUMIDITY);
-  CHECK(v.tvoc_index == MeasuresInvalid::TVOC);
+  CHECK(v.pm1_ugm3 == MeasuresInvalid::PM);
   CHECK(v.pm10_ugm3 == MeasuresInvalid::PM);
   CHECK(v.pressure_hpa == MeasuresInvalid::PRESSURE);
   CHECK(v.altitude_m == MeasuresInvalid::ALTITUDE);
@@ -1172,7 +1172,7 @@ TEST_CASE("RTC snapshot round-trips a fast-path frame exactly") {
   CHECK(rebuilt.pm25_ugm3 == painted.pm25_ugm3);
   CHECK(rebuilt.temperature_c == painted.temperature_c);
   CHECK(rebuilt.humidity_pct == painted.humidity_pct);
-  CHECK(rebuilt.tvoc_index == painted.tvoc_index);
+  CHECK(rebuilt.pm1_ugm3 == painted.pm1_ugm3);
   CHECK(rebuilt.pm10_ugm3 == painted.pm10_ugm3);
   CHECK(rebuilt.pressure_hpa == painted.pressure_hpa);
   CHECK(rebuilt.altitude_m == painted.altitude_m);
