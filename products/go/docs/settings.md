@@ -44,6 +44,7 @@ See [`go_settings.h`](../main/go_settings.h) for full signatures.
 | `auto_lock_seconds` | `"als"` | `int` | `10` | 0, 10, 30, 60 | Runtime auto-lock timeout; `0` = disabled |
 | `portable_sleep_enabled` | `"psl"` | `bool` | `false` | — | Portable only: deep-sleep between measurements while locked and no BLE central is connected. See [Portable Sleep](power_management.md#portable-sleep) |
 | `disable_cloud` | `"dc"` | `bool` | `false` | — | Outbound cloud transport kill switch. Suppresses POST, FETCH, and Stationary OTA checks; does not disable the local API. |
+| `wifi_power_save_enabled` | `"wps"` | `bool` | `false` | — | Wi-Fi power saving; editable through the device UI only. |
 | `configuration_control` | `"cc"` | `int` (stored) / `ConfigurationControl` (in struct) | `Both` (2) | 0 .. 2 | Remote configuration authority: `Cloud`, `Local`, or `Both`. Does not control measurement POST. |
 | `co2_abc_days` | `"cad"` | `int` | `7` | -1 or 1 .. 200 | Automatic background calibration period. `-1` disables it; positive values are applied as 24 hours per day to supported S12 and SCD41 CO2 sensors. |
 | `tvoc_learning_offset` | `"tlo"` | `int` | `12` | 1 .. 1000 | Sensirion VOC gas-index learning-time offset in whole hours. |
@@ -89,9 +90,9 @@ set. Go ignores the retired `useEpa2021` custom-PM option and does not read or
 write its former `mc_pe` NVS key.
 
 Wi-Fi SSID and password are owned by `WifiManager`'s saved-networks store
-(its own `wifi_creds` NVS namespace, injected at construction). Only the
-connection metadata (`disable_cloud`, `configuration_control`, `static_ip`)
-lives in `GoSettings`.
+(its own `wifi_creds` NVS namespace, injected at construction). Connection
+metadata (`disable_cloud`, `configuration_control`, `static_ip`) and the Wi-Fi
+power-saving preference live in `GoSettings`.
 
 ## Load Behavior
 
@@ -142,6 +143,7 @@ All validation is implemented in an anonymous namespace in `go_settings.cpp`
 | `operating_mode` | Underlying int in `0 .. 2` (matches `OperatingMode` enum values) |
 | `auto_lock_seconds` | `0`, `10`, `30`, or `60` |
 | `disable_cloud` | No range check (bool) |
+| `wifi_power_save_enabled` | No range check (bool) |
 | `configuration_control` | Underlying int in `0 .. 2`; `Cloud` is invalid when `disable_cloud == true` |
 | `co2_abc_days` | `-1`, or `>= 1 && <= 200` |
 | `tvoc_learning_offset` | `>= 1 && <= 1000` |

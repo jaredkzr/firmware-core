@@ -161,6 +161,11 @@ measurement wake) and again when a settings change alters them, in which case
 it calls `refresh_broadcast()` at once. Until units are recorded the scan
 response is left out and the broadcast is non-scannable.
 
+Portable mode uses a fixed **500 ms** advertising interval, configured via
+`AgBleServer::set_advertising_interval()` and retained across reconnects.
+Attached provisioning shares this interval; Stationary standalone provisioning
+uses the stack defaults.
+
 ---
 
 ## Security

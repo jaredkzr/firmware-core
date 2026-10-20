@@ -128,7 +128,7 @@ private:
   std::size_t _write_attempt_count = 0;
 };
 
-static constexpr std::size_t GO_SETTINGS_WRITE_COUNT = 31;
+static constexpr std::size_t GO_SETTINGS_WRITE_COUNT = 32;
 
 // ============================================================================
 // Defaults — load from empty store returns struct defaults

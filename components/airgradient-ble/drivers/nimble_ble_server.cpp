@@ -15,6 +15,8 @@
 
 namespace {
 
+constexpr uint32_t ADVERTISING_INTERVAL_UNIT_US = 625;
+
 // Maps AgBleProperty flags to the corresponding NIMBLE_PROPERTY bitmask.
 // NIMBLE_PROPERTY is an unscoped enum; its enumerators are in global scope.
 uint32_t to_nimble_properties(uint16_t props) {
@@ -395,6 +397,37 @@ bool NimbleBleServer::set_manufacturer_data(const uint8_t *data, size_t len) {
   }
 
   return advertising->setManufacturerData(data, len);
+#endif
+}
+
+bool NimbleBleServer::set_advertising_interval(uint32_t interval_us) {
+  if (_server == nullptr || interval_us < BLE_HCI_ADV_ITVL_MIN * ADVERTISING_INTERVAL_UNIT_US ||
+      interval_us > BLE_HCI_ADV_ITVL_MAX * ADVERTISING_INTERVAL_UNIT_US ||
+      interval_us % ADVERTISING_INTERVAL_UNIT_US != 0) {
+    return false;
+  }
+  const uint16_t interval_units = static_cast<uint16_t>(interval_us / ADVERTISING_INTERVAL_UNIT_US);
+
+#if MYNEWT_VAL(BLE_EXT_ADV)
+  // Applies to the connectable set only; the broadcast set keeps its own
+  // interval. Stored in _adv_data, so it is retained until deinit().
+  NimBLEExtAdvertising *advertising = NimBLEDevice::getAdvertising();
+  if (advertising == nullptr || advertising->isActive(CONNECTABLE_ADV_INSTANCE)) {
+    return false;
+  }
+
+  _adv_data->setMinInterval(interval_units);
+  _adv_data->setMaxInterval(interval_units);
+  _adv_configured = false;
+  return true;
+#else
+  NimBLEAdvertising *advertising = NimBLEDevice::getAdvertising();
+  if (advertising == nullptr || advertising->isAdvertising()) {
+    return false;
+  }
+
+  advertising->setAdvertisingInterval(interval_units);
+  return true;
 #endif
 }
 
