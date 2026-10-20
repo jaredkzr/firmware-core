@@ -95,6 +95,23 @@ Advertising is single-connection: `on_connect()` calls `stop_advertising()`,
 advertisement; the BTHome broadcast below keeps running while a client is
 connected.
 
+### Advertising Interval
+
+Portable mode uses a fixed **500 ms** advertising interval, configured via
+`AgBleServer::set_advertising_interval()` and retained across reconnects.
+Attached provisioning shares this interval; Stationary standalone provisioning
+uses the stack defaults. The interval applies to the connectable set only; the
+BTHome broadcast keeps its own.
+
+Portable Sleep wakes (connect windows and measurement wakes) advertise at
+**60 ms** instead, because a connect window advertises for only about 1 s
+(see [Connect windows](power_management.md#connect-windows)).
+`GoApp::start_portable_ble()` calls `set_connect_window_advertising(true)`
+before advertising starts, and `run_interactive()` clears it when it adopts the
+wake's BLE services. Cleared while advertising, it restarts advertising at
+500 ms; cleared while a phone is connected, it applies when advertising resumes
+after the disconnect.
+
 ### BTHome Broadcast
 
 Next to the connectable advertisement, Portable sends the latest readings as a
@@ -160,11 +177,6 @@ orchestrator records them with each measurement (as does the fast-path
 measurement wake) and again when a settings change alters them, in which case
 it calls `refresh_broadcast()` at once. Until units are recorded the scan
 response is left out and the broadcast is non-scannable.
-
-Portable mode uses a fixed **500 ms** advertising interval, configured via
-`AgBleServer::set_advertising_interval()` and retained across reconnects.
-Attached provisioning shares this interval; Stationary standalone provisioning
-uses the stack defaults.
 
 ---
 

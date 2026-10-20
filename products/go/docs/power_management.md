@@ -241,7 +241,9 @@ On a timer wake, `PowerService::is_ble_window_wake()` checks the due time and
    external watchdog.
 2. Builds the Portable BLE services (`start_portable_ble()`: data, provisioning,
    and OTA GATT services; storage stays unmounted) and advertises for
-   `BLE_WINDOW_ADVERTISE_MS` (1 s).
+   `BLE_WINDOW_ADVERTISE_MS` (1 s) at the 60 ms connect-window interval, not the
+   500 ms interactive one (see
+   [Advertising Interval](ble_service.md#advertising-interval)).
 3. With no phone or button press, releases BLE and calls
    `PowerService::resume_ble_window_sleep()`, which arms the next segment toward
    the saved due time.

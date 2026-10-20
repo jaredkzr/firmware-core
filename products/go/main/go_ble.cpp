@@ -55,6 +55,10 @@ static constexpr const char *HISTORY_CHAR_UUID = "d1c0c0a4-6b48-4b2a-9b1d-59f9f2
 
 // Shorter advertising interval to address Android app connection failures.
 static constexpr float ADVERTISING_INTERVAL_MS = 500.0f;
+// Portable Sleep connect windows advertise for about a second, so they keep
+// the stack's fast connectable interval (BLE_GAP_ADV_FAST_INTERVAL1_MAX) they
+// were verified with.
+static constexpr float CONNECT_WINDOW_ADVERTISING_INTERVAL_MS = 60.0f;
 
 // Advertised name ("AirGradient Go <last4hex>") is computed by the shared
 // compute_ble_adv_name() helper (go_ble.h) into BleService::_adv_name.
@@ -645,7 +649,8 @@ bool BleService::start_advertising() {
     return false;
   }
 
-  if (!_server->set_advertising_interval(static_cast<uint32_t>(ADVERTISING_INTERVAL_MS * 1000))) {
+  _configured_interval_us = 0;
+  if (!apply_advertising_interval()) {
     AG_LOGE(TAG, "set_advertising_interval failed");
     _server->deinit();
     return false;
@@ -663,6 +668,36 @@ bool BleService::start_advertising() {
   return true;
 }
 
+bool BleService::apply_advertising_interval() {
+  const float interval_ms = _connect_window_advertising ? CONNECT_WINDOW_ADVERTISING_INTERVAL_MS
+                                                        : ADVERTISING_INTERVAL_MS;
+  const auto interval_us = static_cast<uint32_t>(interval_ms * 1000);
+  if (interval_us == _configured_interval_us) {
+    return true;
+  }
+  if (!_server->set_advertising_interval(interval_us)) {
+    return false;
+  }
+  _configured_interval_us = interval_us;
+  return true;
+}
+
+void BleService::set_connect_window_advertising(bool enabled) {
+  _connect_window_advertising = enabled;
+  // Not advertising yet, or connected: start_advertising() / on_disconnect()
+  // applies it.
+  if (!_initialized || _connected.load()) {
+    return;
+  }
+  // The interval can only change while advertising is stopped.
+  const uint32_t previous_us = _configured_interval_us;
+  _server->stop_advertising();
+  if (!apply_advertising_interval()) {
+    AG_LOGW(TAG, "set_advertising_interval failed; keeping %" PRIu32 " us", previous_us);
+  }
+  _server->start_advertising();
+}
+
 void BleService::deinit() {
   if (!_initialized) {
     return;
@@ -678,6 +713,7 @@ void BleService::deinit() {
   // table differently.
   _server->deinit();
   _initialized = false;
+  _configured_interval_us = 0;
   _measures_char = nullptr;
   _status_char = nullptr;
   _config_char = nullptr;
@@ -765,7 +801,11 @@ void BleService::on_disconnect(uint16_t conn_handle, int reason) {
   _export_active = false;
   _export_session_id = 0;
 
-  // Restart advertising — borrowed server is always bound.
+  // Restart advertising — borrowed server is always bound. An interval change
+  // made while connected applies now.
+  if (!apply_advertising_interval()) {
+    AG_LOGW(TAG, "set_advertising_interval failed on reconnect");
+  }
   _server->start_advertising();
 
   Event evt{};

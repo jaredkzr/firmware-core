@@ -2423,6 +2423,54 @@ TEST_CASE("BLE: advertising uses the Go interval before first start and after re
   CHECK(server.started_intervals_us.back() == expected_interval_us);
 }
 
+TEST_CASE("BLE: connect-window advertising starts at the fast interval") {
+  StorageService storage(*null_cache_ptr, *null_nand_ptr);
+  MockBleServer server;
+  BleService svc(nullptr, storage, server);
+
+  svc.set_connect_window_advertising(true);
+  CHECK(server.start_advertising_count == 0);
+  REQUIRE(svc.start_advertising());
+  REQUIRE(server.started_intervals_us.size() == 1);
+  CHECK(server.started_intervals_us[0] == 60000);
+}
+
+TEST_CASE("BLE: leaving connect-window advertising restarts at the Go interval") {
+  StorageService storage(*null_cache_ptr, *null_nand_ptr);
+  MockBleServer server;
+  BleService svc(nullptr, storage, server);
+  svc.set_connect_window_advertising(true);
+  REQUIRE(svc.start_advertising());
+
+  svc.set_connect_window_advertising(false);
+  CHECK(server.stop_advertising_count == 1);
+  CHECK(server.set_advertising_interval_count == 2);
+  REQUIRE(server.started_intervals_us.size() == 2);
+  CHECK(server.started_intervals_us[1] == 500000);
+
+  // Unchanged: advertising restarts but the interval is not reconfigured.
+  svc.set_connect_window_advertising(false);
+  CHECK(server.set_advertising_interval_count == 2);
+}
+
+TEST_CASE("BLE: an interval change while connected applies when advertising resumes") {
+  StorageService storage(*null_cache_ptr, *null_nand_ptr);
+  MockBleServer server;
+  BleService svc(nullptr, storage, server);
+  svc.set_connect_window_advertising(true);
+  REQUIRE(svc.start_advertising());
+  BleServiceTestAccess::on_connect(svc, 1);
+  const int stops_after_connect = server.stop_advertising_count;
+
+  svc.set_connect_window_advertising(false);
+  CHECK(server.stop_advertising_count == stops_after_connect);
+  CHECK(server.start_advertising_count == 1);
+
+  BleServiceTestAccess::on_disconnect(svc, 1, 0);
+  REQUIRE(server.started_intervals_us.size() == 2);
+  CHECK(server.started_intervals_us[1] == 500000);
+}
+
 TEST_CASE("BLE: interval configuration failure tears down without starting advertising") {
   StorageService storage(*null_cache_ptr, *null_nand_ptr);
   MockBleServer server;

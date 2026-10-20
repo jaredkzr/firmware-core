@@ -230,7 +230,8 @@ CONFIG_BT_NIMBLE_EXT_ADV_MAX_SIZE=31
 The driver then builds the connectable advertisement as advertising set 0 with
 the same legacy PDU, flags, interval, and payload layout as legacy builds
 (flags, UUIDs, and manufacturer data in the advertisement, overflowing to the
-scan response; name in the scan response), so clients see no difference. The
-broadcast is set 1 at the NimBLE default non-connectable interval. Without
+scan response; name in the scan response), so clients see no difference.
+`set_advertising_interval()` changes set 0 only. The broadcast is set 1 at the
+NimBLE default non-connectable interval. Without
 extended advertising (for example the reference product), `set_broadcast_data()`
 returns `false` and the server behaves as before.
