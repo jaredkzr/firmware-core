@@ -1,6 +1,6 @@
 {
   "schema_version": "1.0",
-  "rev": "c30bfb9",
+  "rev": "e89e984",
   "product": {
     "slug": "airgradient-go",
     "name": "AirGradient Go",
@@ -32,7 +32,7 @@
         },
         {
           "action": "Observe Home for up to five minutes from Power press.",
-          "expected_result": "PM2.5, CO2, temperature, humidity, TVOC, NOx, pressure and battery readings become available; warming fields are dashes before they become valid.",
+          "expected_result": "PM2.5, CO2, temperature, humidity, PM1.0, PM10, pressure and battery readings become available; warming fields are dashes before they become valid.",
           "evidence": [
             "Record version and a Home photo; video a stalled or incomplete refresh."
           ]
@@ -1117,8 +1117,134 @@
       ]
     },
     {
+      "id": "display.refresh.flash-policy",
+      "title": "Interaction stays flash-free and locking cleans up ghosting",
+      "objective": "Verify the e-paper display does not flash while the unlocked user navigates, leaves a menu or watches Home update, and that locking runs a single ghosting-cleanup flash only after enough partial updates have accumulated.",
+      "category": "Display & Controls",
+      "sub_category": "Display Refresh",
+      "applicability": [
+        "V1"
+      ],
+      "setup": [
+        "A USB data cable.",
+        "A computer with access to the AirGradient logging tool.",
+        "A camera or phone that can record video of the display.",
+        "The original measurement interval is one of the fixed UI choices: 3, 10, 30, 60, 300, 900 or 3600 seconds."
+      ],
+      "steps": [
+        {
+          "action": "Record the current operating mode, lock state, USB connection state and Auto Lock and interval. Unlock with a short Power press if needed. Settings paths below start at Main Menu > Settings.",
+          "expected_result": "The original values are recorded for cleanup and the controls are unlocked."
+        },
+        {
+          "action": "Connect the USB data cable and start the AirGradient logging tool. Keep logging during the observations below; reconnect if the connection is lost.",
+          "expected_result": "The device logs are visible before the observations that use them."
+        },
+        {
+          "action": "Select Main Menu > Operating Mode > Portable. Set Display & Touch > Auto Lock > Off and Operations > Measure Int. > 10s, and return Home.",
+          "expected_result": "Portable Home is unlocked and updates every 10 seconds."
+        },
+        {
+          "action": "Short-press Power to lock, wait five seconds, then short-press Power to unlock.",
+          "expected_result": "The device locks and unlocks. A flash on this lock is allowed; it gives the following steps a fresh cleanup baseline."
+        },
+        {
+          "action": "Start recording video. Open Main Menu > Settings > Operations, select Back, select Back again, then select Exit Menu. Leave Home untouched for six minutes.",
+          "expected_result": "No black/white inversion or flash occurs while navigating, when leaving the menu, or during the Home updates; readings change in place. The log shows no Fast refresh or Full refresh line in this period.",
+          "evidence": [
+            "Keep the video of the navigation and the first minute on Home."
+          ]
+        },
+        {
+          "action": "Short-press Power to lock and watch the display for 10 seconds.",
+          "expected_result": "The lock repaint runs one ghosting cleanup: the log shows one Fast refresh line and the screen inverts once, or the log shows Full refresh and the multi-flash full refresh is seen. No other flash follows while locked.",
+          "evidence": [
+            "Record a video of the lock and save the matching refresh log line."
+          ]
+        },
+        {
+          "action": "Within 10 seconds of the lock, short-press Power to unlock, then within another 10 seconds short-press Power to lock again without touching other controls.",
+          "expected_result": "Neither the unlock nor this second lock flashes, and the log shows no new Fast refresh or Full refresh line."
+        },
+        {
+          "action": "Inspect the locked Home from normal viewing distance.",
+          "expected_result": "No faint outlines of earlier digits, menu rows or other screens remain visible.",
+          "evidence": [
+            "Save a photo of the locked Home."
+          ]
+        }
+      ],
+      "cleanup": [
+        "Exit any menu or diagnostic opened by this case.",
+        "Restore only the original values captured before this case changed them: Auto Lock and interval, operating mode, lock state and USB connection state.",
+        "Verify the restored settings. If restoration fails or a required baseline was not captured, record the remaining state.",
+        "Download the required logs from the AirGradient logging tool and disconnect the tool."
+      ],
+      "references": [
+        "products/go/docs/display_service.md"
+      ]
+    },
+    {
+      "id": "display.refresh.sleep-wake",
+      "title": "Deep-sleep wakes update the retained display without flashing",
+      "objective": "Verify measurement wakes and a Power wake from deep sleep repaint the e-paper frame kept from before sleep with flash-free partial updates, without leaving ghost images.",
+      "category": "Display & Controls",
+      "sub_category": "Display Refresh",
+      "applicability": [
+        "V1"
+      ],
+      "setup": [
+        "A USB data cable.",
+        "A computer with access to the AirGradient logging tool.",
+        "A camera or phone that can record video of the display.",
+        "The original measurement interval is one of the fixed UI choices: 3, 10, 30, 60, 300, 900 or 3600 seconds."
+      ],
+      "steps": [
+        {
+          "action": "Record the current operating mode, lock state, USB connection state and interval and Auto Lock. Unlock with a short Power press if needed. Settings paths below start at Main Menu > Settings.",
+          "expected_result": "The original values are recorded for cleanup and the controls are unlocked."
+        },
+        {
+          "action": "Connect the USB data cable and start the AirGradient logging tool. Keep logging during the observations below; reconnect if the connection is lost.",
+          "expected_result": "The device logs are visible before the observations that use them."
+        },
+        {
+          "action": "Select Main Menu > Operating Mode > Offline.",
+          "expected_result": "Offline is selected."
+        },
+        {
+          "action": "Set Operations > Measure Int. > 60s and Display & Touch > Auto Lock > 10 Seconds, return Home and let the unit auto-lock. Record video and capture three measurement wakes, allowing four minutes from the lock. Reconnect the logging tool after a wake if needed; if required wake logs were missed, record the observation as incomplete.",
+          "expected_result": "From the second measurement wake on, each wake updates the readings without a visible flash and logs init refresh: Partial (painted=1 retained=1. The first wake after the lock may use a flashing full refresh.",
+          "evidence": [
+            "Keep the video and save the init refresh log line of each wake."
+          ]
+        },
+        {
+          "action": "After a measurement wake has finished and before the next one, short-press Power once.",
+          "expected_result": "Unlocked Home appears without a flash and the log shows init refresh: Partial (painted=1 retained=1. The wake press does not relock the unit."
+        },
+        {
+          "action": "Inspect Home from normal viewing distance.",
+          "expected_result": "No faint outlines of earlier readings or of the locked frame remain visible.",
+          "evidence": [
+            "Save a photo of Home."
+          ]
+        }
+      ],
+      "cleanup": [
+        "Exit any menu or diagnostic opened by this case.",
+        "Restore only the original values captured before this case changed them: interval and Auto Lock, operating mode, lock state and USB connection state.",
+        "Verify the restored settings. If restoration fails or a required baseline was not captured, record the remaining state.",
+        "Download the required logs from the AirGradient logging tool and disconnect the tool."
+      ],
+      "references": [
+        "products/go/docs/display_service.md",
+        "products/go/docs/power_management.md"
+      ]
+    },
+    {
       "id": "go.display.chart-navigation",
-      "title": "Home cycles through the four measurement charts",
+      "title": "Home cycles through the eight measurement charts",
       "objective": "Verify chart selection and removal.",
       "category": "Measurements",
       "sub_category": "Charts",
@@ -1139,7 +1265,7 @@
         },
         {
           "action": "Set Auto Lock Off and Operations > Measure Int. > 10s. Wait five Home updates, allowing one minute. From Home press Down through a full cycle, then Up through the reverse cycle.",
-          "expected_result": "The order is None, PM2.5, CO2, Temperature, Humidity, None; Up reverses it. Selected charts show Min/Max; None removes the chart."
+          "expected_result": "The order is None, PM2.5, CO2, Temperature, Humidity, PM1.0, PM10, Pressure, Altitude, None; Up reverses it. Selected charts show Min/Max; None removes the chart."
         }
       ],
       "cleanup": [
@@ -1691,8 +1817,8 @@
     },
     {
       "id": "go.corrections.existing-chart",
-      "title": "Changing a correction re-renders existing chart samples",
-      "objective": "Verify raw chart history is transformed at display time.",
+      "title": "A correction change applies to new chart samples only",
+      "objective": "Verify the chart keeps the corrected values its samples were recorded with and plots new samples with a changed correction, without a restart.",
       "category": "Measurements",
       "sub_category": "Corrections",
       "applicability": [
@@ -1742,7 +1868,14 @@
         },
         {
           "action": "Return to the Temperature chart before the next scheduled measurement.",
-          "expected_result": "Its valid cached values and Min/Max now show 20 C; it does not need five new measurements to replace old history."
+          "expected_result": "The line and Min/Max match the earlier photo: samples recorded before the change keep the correction they were recorded with."
+        },
+        {
+          "action": "Keep the Temperature chart selected for three scheduled measurements, allowing four minutes.",
+          "expected_result": "The title value reads 20.0 C and the newest end of the line moves to 20.0 C while the older part keeps its earlier values; Min or Max reads 20.0 C.",
+          "evidence": [
+            "Save the before-change and after-change chart photos."
+          ]
         }
       ],
       "cleanup": [
@@ -1755,7 +1888,8 @@
       ],
       "references": [
         "products/go/docs/measurement_corrections.md",
-        "products/go/docs/display_service.md"
+        "products/go/docs/display_service.md",
+        "products/go/docs/ui_manager.md"
       ]
     },
     {
@@ -2780,6 +2914,84 @@
       ],
       "references": [
         "products/go/docs/ble_service.md"
+      ]
+    },
+    {
+      "id": "portable.ble.bthome-broadcast",
+      "title": "Portable broadcasts readings that BTHome receivers decode without pairing",
+      "objective": "Verify Portable mode sends the displayed readings as an unencrypted BTHome v2 broadcast that Home Assistant decodes without connecting, that it continues while a phone is connected and through Portable Sleep, that active scanners receive the Go's display units with it, and that it stops outside Portable.",
+      "category": "Portable BLE",
+      "sub_category": "BTHome Broadcast",
+      "applicability": [
+        "V1"
+      ],
+      "setup": [
+        "An Android phone with nRF Connect for Mobile and Bluetooth enabled.",
+        "A Home Assistant instance with the BTHome integration and a Bluetooth adapter or ESPHome Bluetooth proxy within range of the test unit.",
+        "No other Bluetooth client is connected to, or set to auto-connect to, the test unit.",
+        "The original measurement interval is one of the fixed UI choices: 3, 10, 30, 60, 300, 900 or 3600 seconds."
+      ],
+      "steps": [
+        {
+          "action": "Record the current operating mode, lock state, USB connection state, interval, Auto Lock, Portable Sleep, Temperature Unit, PM Display, Altitude Unit, the device serial shown in About Device, and whether Home Assistant already lists a BTHome device for this unit. Unlock with a short Power press if needed. Settings paths below start at Main Menu > Settings.",
+          "expected_result": "The original values are recorded for cleanup and the controls are unlocked."
+        },
+        {
+          "action": "Select Main Menu > Operating Mode > Portable. Set Operations > Measure Int. > 10s, Display & Touch > Auto Lock > Off, Temperature Unit > C, PM Display > ug/m3 and Altitude Unit > m. Return Home and wait for valid PM2.5, CO2, temperature, humidity, PM1.0 and PM10, allowing five minutes.",
+          "expected_result": "Home shows valid readings in C and ug/m3."
+        },
+        {
+          "action": "In nRF Connect, scan for up to 30 seconds without connecting. Open the scan entry of AirGradient Go <last4>, matching the last four characters of the recorded serial, record its Bluetooth address, and watch its advertising data for 10 seconds.",
+          "expected_result": "The unit's address sends both the connectable AirGradient Go <last4> advertisement with service UUID d1c0c0a0-6b48-4b2a-9b1d-59f9f2b0a1e1 and a broadcast with Service Data for UUID 0xFCD2 whose first byte is 0x40 (BTHome v2, unencrypted).",
+          "evidence": [
+            "Save a screenshot of each advertisement."
+          ]
+        },
+        {
+          "action": "In Home Assistant, open Settings > Devices & services and configure the discovered BTHome device with the recorded Bluetooth address.",
+          "expected_result": "Home Assistant adds it without pairing or an encryption key, with sensors for battery, temperature, humidity, PM2.5, PM10, carbon dioxide and one count sensor that carries PM1.0."
+        },
+        {
+          "action": "Just after a Home update, compare the Home Assistant values with Home, allowing 10 seconds for Home Assistant to update.",
+          "expected_result": "Temperature matches within 0.1 C, humidity within 1 %, PM2.5, PM10 and CO2 within 1 unit, and the count sensor equals Home's PM1.0 within 1 ug/m3. Battery shows a percentage from 0 to 100.",
+          "evidence": [
+            "Save a Home photo and a Home Assistant screenshot taken within 10 seconds of each other."
+          ]
+        },
+        {
+          "action": "In nRF Connect, scan for up to 30 seconds and connect to AirGradient Go <last4>, matching the last four characters of the recorded device serial. Expand service d1c0c0a0-6b48-4b2a-9b1d-59f9f2b0a1e1 and use Read on characteristic d1c0c0a3-6b48-4b2a-9b1d-59f9f2b0a1e1. If pairing is requested, enter the six-digit passkey shown on Go. Do not write to any characteristic. Keep the connection open for two minutes and watch Home Assistant.",
+          "expected_result": "While the phone stays connected, the Home Assistant values keep following the Home readings."
+        },
+        {
+          "action": "Disconnect in nRF Connect. Set Settings > Power Saving > Portable Sleep > On, Operations > Measure Int. > 60s and Display & Touch > Auto Lock > 10 Seconds. Return Home, let the unit auto-lock, and watch Home and Home Assistant for four minutes.",
+          "expected_result": "While the unit sleeps, Home Assistant keeps updating after each measurement wake, matching the locked Home readings with the tolerances above."
+        },
+        {
+          "action": "Short-press Power to wake and set Display & Touch > Auto Lock > Off. In nRF Connect, scan without connecting and inspect the scan response sent with the 0xFCD2 broadcast.",
+          "expected_result": "It carries manufacturer data for company ID 0xFFFF with the bytes 0x01 0x00 (format 1, no unit flags set)."
+        },
+        {
+          "action": "Select Temperature Unit > F and inspect the same scan response within 10 seconds. Then select PM Display > USAQI and inspect it, then Altitude Unit > ft and inspect it.",
+          "expected_result": "The second byte changes to 0x01 after the temperature change, 0x03 after the PM change and 0x07 after the altitude change, each within 10 seconds of the selection and without waiting for a measurement.",
+          "evidence": [
+            "Save a screenshot of each scan response."
+          ]
+        },
+        {
+          "action": "Select Main Menu > Operating Mode > Offline, keep the unit unlocked, and scan in nRF Connect for 30 seconds while watching Home Assistant.",
+          "expected_result": "No Service Data for UUID 0xFCD2 and no AirGradient Go <last4> advertisement is received from the recorded address, and Home Assistant receives no new values."
+        }
+      ],
+      "cleanup": [
+        "Disconnect in nRF Connect, preserving any pre-existing bond.",
+        "Exit any menu or diagnostic opened by this case.",
+        "Restore only the original values captured before this case changed them: Portable Sleep, interval, Auto Lock, Temperature Unit, PM Display and Altitude Unit, operating mode, lock state and USB connection state.",
+        "Verify the restored settings. If restoration fails or a required baseline was not captured, record the remaining state.",
+        "If this case added the unit to Home Assistant, delete that device from Home Assistant; leave a pre-existing entry in place."
+      ],
+      "references": [
+        "products/go/docs/ble_service.md",
+        "products/go/docs/power_management.md"
       ]
     },
     {
@@ -5658,6 +5870,107 @@
       ]
     },
     {
+      "id": "portable.sleep.between-samples",
+      "title": "Portable Sleep deep-sleeps between measurements and stays connectable",
+      "objective": "Verify Settings > Power Saving > Portable Sleep makes a locked Portable unit with no phone connected deep-sleep between measurements, keeps it connectable for a bonded phone through its connect windows, keeps it awake while a phone is connected, and leaves Portable awake when set Off.",
+      "category": "Modes & Sleep",
+      "sub_category": "Portable Sleep",
+      "applicability": [
+        "V1"
+      ],
+      "setup": [
+        "An Android phone with nRF Connect for Mobile and Bluetooth enabled.",
+        "No other Bluetooth client is connected to, or set to auto-connect to, the test unit.",
+        "A USB data cable.",
+        "A computer with access to the AirGradient logging tool.",
+        "The original measurement interval is one of the fixed UI choices: 3, 10, 30, 60, 300, 900 or 3600 seconds."
+      ],
+      "steps": [
+        {
+          "action": "Record the current operating mode, lock state, USB connection state and interval, Auto Lock, Portable Sleep and the device serial shown in About Device. Unlock with a short Power press if needed. Settings paths below start at Main Menu > Settings.",
+          "expected_result": "The original values are recorded for cleanup and the controls are unlocked."
+        },
+        {
+          "action": "Connect the USB data cable and start the AirGradient logging tool. Keep logging during the observations below; reconnect if the connection is lost.",
+          "expected_result": "The device logs are visible before the observations that use them."
+        },
+        {
+          "action": "Select Main Menu > Operating Mode > Portable. Set Operations > Measure Int. > 60s and Display & Touch > Auto Lock > 10 Seconds. Open Settings > Power Saving.",
+          "expected_result": "Power Saving opens with Portable Sleep: Off or Portable Sleep: On selected as its first row, above Wi-Fi Power Saving."
+        },
+        {
+          "action": "In nRF Connect, scan for up to 30 seconds and connect to AirGradient Go <last4>, matching the last four characters of the recorded device serial. Expand service d1c0c0a0-6b48-4b2a-9b1d-59f9f2b0a1e1 and use Read on characteristic d1c0c0a3-6b48-4b2a-9b1d-59f9f2b0a1e1. If pairing is requested, enter the six-digit passkey shown on Go. Do not write to any characteristic. Then disconnect in nRF Connect without deleting the bond.",
+          "expected_result": "The read succeeds over a paired connection and the bond is kept after disconnecting."
+        },
+        {
+          "action": "Open Settings > Power Saving > Portable Sleep and select On.",
+          "expected_result": "Power Saving returns with Portable Sleep: On on the selected row."
+        },
+        {
+          "action": "Disconnect USB, hold Power until Powered off is painted, release Power, wait 10 seconds, then press Power to start. Reconnect the USB data cable and the logging tool, then open Settings > Power Saving.",
+          "expected_result": "Portable Sleep: On is still shown after the cold restart."
+        },
+        {
+          "action": "Return Home with no nRF Connect connection open and let the unit auto-lock. Watch the log for up to 80 seconds from the lock.",
+          "expected_result": "The log shows entering deep sleep followed by enter_sleep: entering deep sleep for N ms (timer T ms), with T at most 10000."
+        },
+        {
+          "action": "In nRF Connect, scan for two minutes while the unit sleeps and watch the RSSI graph of AirGradient Go <last4>.",
+          "expected_result": "The unit is received in bursts of about one second roughly every 10 to 12 seconds, plus a longer burst at each measurement wake about once per minute, with nothing received between bursts.",
+          "evidence": [
+            "Save a screenshot of the RSSI graph."
+          ]
+        },
+        {
+          "action": "Watch Home and the log across two measurement wakes, allowing 150 seconds. Reconnect the logging tool after a wake if needed.",
+          "expected_result": "Each measurement wake logs run_fast_path: entering fast-path boot and a fast-path: line with valid temp, hum, pm25, co2, pres and pm10 values and tvoc=-1 nox=-1, because the SGP41 is not run on Portable Sleep wakes. Home stays locked and updates its readings, including PM1.0 and PM10, after each wake."
+        },
+        {
+          "action": "While the unit sleeps, tap Connect on AirGradient Go <last4> in nRF Connect and allow up to 20 seconds. Once connected, enable notifications on characteristic d1c0c0a1-6b48-4b2a-9b1d-59f9f2b0a1e1 and watch for two minutes. Do not write to any characteristic.",
+          "expected_result": "The connection succeeds without a passkey prompt. The log shows connect window: promoting to interactive (phone=1 button=0) or fast-path promoting to interactive (button=0 ble=1). Home stays locked, and at least one notification arrives within two minutes of connecting; decoding it is unnecessary.",
+          "evidence": [
+            "Save the promotion log line."
+          ]
+        },
+        {
+          "action": "Keep the connection open with the unit locked for another 150 seconds.",
+          "expected_result": "No deep-sleep entry is logged, the connection stays open, and notifications keep arriving about once per minute."
+        },
+        {
+          "action": "Disconnect in nRF Connect without deleting the bond and watch the log for up to 80 seconds.",
+          "expected_result": "entering deep sleep is logged within 80 seconds of the disconnect."
+        },
+        {
+          "action": "After the next measurement wake has finished, short-press Power once during the sleep.",
+          "expected_result": "The log shows run_button_wake_path: entering button-wake boot, or connect window: promoting to interactive (phone=0 button=1) if the press landed in a connect window. Unlocked Home shows the last readings and does not relock immediately."
+        },
+        {
+          "action": "Select the PM2.5 chart on Home.",
+          "expected_result": "The chart shows a continuous line whose left time label reaches back at least to the lock before the first deep sleep, so the measurements taken while asleep are included."
+        },
+        {
+          "action": "In nRF Connect, scan for up to 30 seconds and connect to AirGradient Go <last4>, matching the last four characters of the recorded device serial. Expand service d1c0c0a0-6b48-4b2a-9b1d-59f9f2b0a1e1 and use Read on characteristic d1c0c0a3-6b48-4b2a-9b1d-59f9f2b0a1e1. If pairing is requested, enter the six-digit passkey shown on Go. Do not write to any characteristic. Then disconnect in nRF Connect without deleting the bond.",
+          "expected_result": "The bonded phone connects without a passkey prompt while Home is unlocked."
+        },
+        {
+          "action": "Open Settings > Power Saving > Portable Sleep and select Off. Return Home, let the unit auto-lock, and watch the log and an nRF Connect scan for two minutes.",
+          "expected_result": "No deep-sleep entry is logged, measurements continue every 60 seconds and AirGradient Go <last4> is received continuously."
+        }
+      ],
+      "cleanup": [
+        "Disconnect in nRF Connect, preserving the bond.",
+        "Exit any menu or diagnostic opened by this case.",
+        "Restore only the original values captured before this case changed them: Portable Sleep, interval and Auto Lock, operating mode, lock state and USB connection state.",
+        "Verify the restored settings. If restoration fails or a required baseline was not captured, record the remaining state.",
+        "Download the required logs from the AirGradient logging tool and disconnect the tool."
+      ],
+      "references": [
+        "products/go/docs/power_management.md",
+        "products/go/docs/ble_service.md",
+        "products/go/docs/ui_manager.md"
+      ]
+    },
+    {
       "id": "go.power.usb-insert",
       "title": "USB insertion starts charging",
       "objective": "Verify the visible transition does not restart sensing.",
@@ -5986,6 +6299,138 @@
       ],
       "references": [
         "products/go/docs/power_management.md"
+      ]
+    },
+    {
+      "id": "power.sleep.peripheral-idle",
+      "title": "Deep sleep idles LEDs and untracked GPS, and sensors recover on wake",
+      "objective": "Verify that a cold Portable Sleep deep sleep turns off the AQI LEDs and an Always On GPS with no tracking session, so neither setting raises sleep current, and that the sensors, LEDs and touch controls recover after waking.",
+      "category": "Power",
+      "sub_category": "Sleep Current",
+      "applicability": [
+        "V1"
+      ],
+      "setup": [
+        "A current-limited bench power supply wired to the battery connector in place of the cell, with correct polarity.",
+        "An ammeter in series with that supply that can average current over 30 seconds.",
+        "Tracking is idle.",
+        "No other Bluetooth client is connected to, or set to auto-connect to, the test unit.",
+        "The original measurement interval is one of the fixed UI choices: 3, 10, 30, 60, 300, 900 or 3600 seconds."
+      ],
+      "steps": [
+        {
+          "action": "Record the current operating mode, lock state, USB connection state and interval, Auto Lock, Portable Sleep, AQI LED and GPS Mode. Unlock with a short Power press if needed. Settings paths below start at Main Menu > Settings.",
+          "expected_result": "The original values are recorded for cleanup and the controls are unlocked."
+        },
+        {
+          "action": "Disconnect USB and set the bench supply to 3.80 V.",
+          "expected_result": "Home shows battery operation with no plug or charging icon."
+        },
+        {
+          "action": "Select Main Menu > Operating Mode > Portable. Set Operations > Measure Int. > 60s, Operations > GPS Mode > Always On, Display & Touch > AQI LED > Bright, Display & Touch > Auto Lock > Off and Power Saving > Portable Sleep > On. Return Home and wait for valid readings, allowing five minutes.",
+          "expected_result": "Home shows valid PM2.5, CO2, temperature, humidity, PM1.0, PM10 and pressure, and the rear AQI LEDs glow brightly in the AQI color."
+        },
+        {
+          "action": "Set Display & Touch > Auto Lock > 10 Seconds, return Home and let the unit auto-lock. Watch through the next measurement wake. Starting five seconds after Home updates, average the supply current over 30 seconds and record it as the LED/GPS-on average.",
+          "expected_result": "The AQI and touch LEDs turn off when the unit goes to sleep and stay off through the measurement wake. After the wake, Home shows valid PM2.5, CO2, temperature, humidity, PM1.0, PM10 and pressure without a Getting Ready screen. The average is recorded.",
+          "evidence": [
+            "Record the 30-second average."
+          ]
+        },
+        {
+          "action": "Short-press Power and watch for up to 75 seconds.",
+          "expected_result": "Unlocked Home appears, the AQI LEDs return to the AQI color at Bright within 75 seconds, and the touch controls navigate normally."
+        },
+        {
+          "action": "Set Operations > GPS Mode > Always Off and Display & Touch > AQI LED > Off. Return Home, let the unit auto-lock, and measure the 30-second average after the next measurement wake as in the earlier step.",
+          "expected_result": "After the wake, Home again shows valid readings for every field. This average differs from the LED/GPS-on average by less than 1 mA.",
+          "evidence": [
+            "Record the 30-second average."
+          ]
+        }
+      ],
+      "cleanup": [
+        "Exit any menu or diagnostic opened by this case.",
+        "Restore only the original values captured before this case changed them: interval, Auto Lock, Portable Sleep, AQI LED and GPS Mode, operating mode, lock state and USB connection state.",
+        "Verify the restored settings. If restoration fails or a required baseline was not captured, record the remaining state.",
+        "If the cell was removed for this case, hold Power until Powered off is painted, disconnect the bench supply and reinstall the cell with correct polarity."
+      ],
+      "references": [
+        "products/go/docs/power_management.md",
+        "products/go/docs/led_service.md"
+      ]
+    },
+    {
+      "id": "power.shutdown.over-discharge",
+      "title": "A cell below 2.9 V powers the unit off from sleep and awake paths",
+      "objective": "Verify the software over-discharge cutoff shows the critically-low page and enters ship mode when the cell stays below 2.9 V on battery, on Portable Sleep and Offline deep-sleep wakes as well as while awake, and again after a restart on a still-low cell.",
+      "category": "Power",
+      "sub_category": "Shutdown",
+      "applicability": [
+        "V1"
+      ],
+      "setup": [
+        "A current-limited bench power supply wired to the battery connector in place of the cell, with correct polarity.",
+        "An ammeter in series with that supply.",
+        "An Android phone with nRF Connect for Mobile and Bluetooth enabled.",
+        "No other Bluetooth client is connected to, or set to auto-connect to, the test unit.",
+        "The original measurement interval is one of the fixed UI choices: 3, 10, 30, 60, 300, 900 or 3600 seconds."
+      ],
+      "steps": [
+        {
+          "action": "Record the current operating mode, lock state, USB connection state and interval, Auto Lock, Portable Sleep and the device serial shown in About Device. Unlock with a short Power press if needed. Settings paths below start at Main Menu > Settings.",
+          "expected_result": "The original values are recorded for cleanup and the controls are unlocked."
+        },
+        {
+          "action": "Disconnect USB and set the bench supply to 3.40 V.",
+          "expected_result": "Home shows battery operation with no plug or charging icon."
+        },
+        {
+          "action": "Select Main Menu > Operating Mode > Portable. Set Operations > Measure Int. > 60s, Power Saving > Portable Sleep > On and Display & Touch > Auto Lock > 10 Seconds. Return Home and let the unit auto-lock. After the next measurement wake updates Home, wait five seconds and record the supply current averaged over 10 seconds as the sleep baseline.",
+          "expected_result": "The unit sleeps between measurements and the sleep baseline is recorded."
+        },
+        {
+          "action": "While the unit sleeps, lower the supply to 2.85 V. Watch the display and the ammeter, and scan in nRF Connect, for 90 seconds from the change, then for two more minutes.",
+          "expected_result": "At the next measurement wake the display shows Battery critically low, Connect charger and Charge before use, and the unit powers off: the current falls below the sleep baseline and stays there, and no AirGradient Go <last4> advertisement or wake occurs for the two minutes.",
+          "evidence": [
+            "Save a photo of the page and record the current after power-off."
+          ]
+        },
+        {
+          "action": "Raise the supply to 3.40 V and short-press Power. Allow 60 seconds.",
+          "expected_result": "The unit starts normally and reaches Home."
+        },
+        {
+          "action": "Select Main Menu > Operating Mode > Offline and let the unit auto-lock. After the next measurement wake updates Home, lower the supply to 2.85 V and observe for 90 seconds.",
+          "expected_result": "At the next measurement wake the critically-low page appears and the current falls below the sleep baseline and stays there."
+        },
+        {
+          "action": "Raise the supply to 3.40 V and short-press Power. After Home appears, select Main Menu > Operating Mode > Portable, set Power Saving > Portable Sleep > Off and Display & Touch > Auto Lock > Off, and return Home.",
+          "expected_result": "Portable Home stays unlocked and awake."
+        },
+        {
+          "action": "Lower the supply to 2.85 V and observe for up to 120 seconds.",
+          "expected_result": "Within 120 seconds the critically-low page appears and the unit powers off as before; until then Home keeps working."
+        },
+        {
+          "action": "Keep the supply at 2.85 V and short-press Power. Observe for up to 150 seconds.",
+          "expected_result": "The unit starts, then within 150 seconds of the press shows the critically-low page again and powers off."
+        },
+        {
+          "action": "Raise the supply to 3.40 V and short-press Power. Allow 60 seconds.",
+          "expected_result": "The unit starts normally and reaches Home."
+        }
+      ],
+      "cleanup": [
+        "If the unit is powered off, set the supply to 3.40 V and short-press Power.",
+        "Exit any menu or diagnostic opened by this case.",
+        "Restore only the original values captured before this case changed them: interval, Auto Lock and Portable Sleep, operating mode, lock state and USB connection state.",
+        "Verify the restored settings. If restoration fails or a required baseline was not captured, record the remaining state.",
+        "If the cell was removed for this case, hold Power until Powered off is painted, disconnect the bench supply and reinstall the cell with correct polarity."
+      ],
+      "references": [
+        "products/go/docs/power_management.md",
+        "products/go/docs/display_service.md"
       ]
     },
     {

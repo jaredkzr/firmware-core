@@ -198,10 +198,10 @@ records.
 |---|---|---|
 | Local API Measures | Corrected | Publishes the latest corrected snapshot |
 | Current display | Corrected | Applies unit and AQI presentation after correction |
-| Display charts | Corrected | Corrects raw cache copies in the chart scratch buffer at render time |
+| Display charts | Corrected | RTC chart history records the corrected snapshot per sample; a correction change applies to new samples only |
 | PM AQI LED | Corrected | Converts corrected PM2.5 to AQI color |
 | AirGradient cloud POST | Raw | Cloud receives the authoritative sensor snapshot |
-| RTC measurement cache | Raw | Preserves chart samples without a correction version |
+| RTC measurement cache | Raw | Preserves cached samples without a correction version |
 | Persistent route storage | Raw | Preserves route points without a correction version |
 | BLE Measures | Raw | Clients choose whether to apply the correction settings |
 | BLE History | Raw | Exports raw route-point copies for client-side policy |

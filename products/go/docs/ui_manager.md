@@ -188,7 +188,7 @@ rows follow this order:
 
 Settings and its groups fit on one page. Opening Settings selects Operations;
 Operations selects Measurement Interval, Display & Touch selects Temperature
-Unit, Power Saving selects Wi-Fi Power Saving, and Hardware Test selects
+Unit, Power Saving selects Portable Sleep, and Hardware Test selects
 Peripheral Test. Reopening these menus selects the first content row.
 Choice screens select the active value; applying an ordinary setting returns
 to its owning group on the source row. Back and double-press restore that
