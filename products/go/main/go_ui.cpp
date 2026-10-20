@@ -997,12 +997,12 @@ void UIManager::browse_metric(int delta) {
 
 const UIManager::SettingId *UIManager::group_items(Screen screen, uint8_t &count) {
   static constexpr SettingId OPERATIONS[] = {SettingId::MeasureInterval, SettingId::Co2Calibration,
-                                             SettingId::GpsMode, SettingId::Buzzer,
-                                             SettingId::PortableSleep};
+                                             SettingId::GpsMode, SettingId::Buzzer};
   static constexpr SettingId DISPLAY_TOUCH[] = {SettingId::Units,     SettingId::AltitudeUnit,
                                                 SettingId::PmDisplay, SettingId::AutoLock,
                                                 SettingId::AqiLed,    SettingId::TouchLed};
-  static constexpr SettingId POWER_SAVING[] = {SettingId::WifiPowerSaving};
+  static constexpr SettingId POWER_SAVING[] = {SettingId::PortableSleep,
+                                               SettingId::WifiPowerSaving};
   static_assert(sizeof(OPERATIONS) / sizeof(OPERATIONS[0]) + 2 <= MAX_LIST_ROWS);
   static_assert(sizeof(DISPLAY_TOUCH) / sizeof(DISPLAY_TOUCH[0]) + 2 <= MAX_LIST_ROWS);
   static_assert(sizeof(POWER_SAVING) / sizeof(POWER_SAVING[0]) + 2 <= MAX_LIST_ROWS);

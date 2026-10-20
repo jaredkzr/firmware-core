@@ -145,19 +145,18 @@ TEST_CASE("UIManager: agreed menu hierarchy", "[UIManager][nav][redesign]") {
                   "Clear Data", "Setup Guide", "About Device"});
   open_row(ui, "Operations");
   auto values = ui.build_values(make_default_ctx());
-  REQUIRE(values.row_count == 7);
+  REQUIRE(values.row_count == 6);
   CHECK(std::string(values.rows[2].text).rfind("Measure Int.: ", 0) == 0);
   CHECK(std::string(values.rows[3].text) == "CO2 Calibration");
   CHECK(std::string(values.rows[4].text) == "GPS: When tracking");
   CHECK(std::string(values.rows[5].text) == "Buzzer: Off");
-  CHECK(std::string(values.rows[6].text) == "Portable Sleep: Off");
   double_press(ui);
   open_row(ui, "Display & Touch");
   check_rows(ui, {"Exit", "Back", "Temperature Unit: C", "Altitude Unit: m", "PM Display: ug/m3",
                   "Auto Lock: Off", "AQI LED: Off", "Touch LED: Off"});
   double_press(ui);
   open_row(ui, "Power Saving");
-  check_rows(ui, {"Exit", "Back", "Wi-Fi Power Saving"});
+  check_rows(ui, {"Exit", "Back", "Portable Sleep: Off", "Wi-Fi Power Saving"});
   double_press(ui);
   open_row(ui, "Hardware Test");
   check_rows(ui, {"Exit", "Back", "Peripheral Test", "GPS Test", "Accelerometer Test",
@@ -202,9 +201,9 @@ TEST_CASE("UIManager: group choice returns and exit gestures", "[UIManager][nav]
       {"Operations", "Measure Int.", "10s", Screen::Operations},
       {"Operations", "GPS:", "Always On", Screen::Operations},
       {"Operations", "Buzzer:", "On", Screen::Operations},
-      {"Operations", "Portable Sleep:", "On", Screen::Operations},
       {"Display & Touch", "PM Display:", "USAQI", Screen::DisplayTouch},
       {"Display & Touch", "Auto Lock:", "60 Seconds", Screen::DisplayTouch},
+      {"Power Saving", "Portable Sleep:", "On", Screen::PowerSaving},
       {"Power Saving", "Wi-Fi Power Saving", "Enable", Screen::PowerSaving},
   };
   for (const auto &choice : choices) {
@@ -404,9 +403,9 @@ TEST_CASE("UIManager: grouped menus wrap and return to their parent",
   };
   const MenuCase cases[] = {
       {nullptr, Screen::Settings, "Operations", "About Device", 9},
-      {"Operations", Screen::Operations, "Measure Int.", "Portable Sleep: Off", 7},
+      {"Operations", Screen::Operations, "Measure Int.", "Buzzer: Off", 6},
       {"Display & Touch", Screen::DisplayTouch, "Temperature Unit: C", "Touch LED: Off", 8},
-      {"Power Saving", Screen::PowerSaving, "Wi-Fi Power Saving", "Wi-Fi Power Saving", 3},
+      {"Power Saving", Screen::PowerSaving, "Portable Sleep: Off", "Wi-Fi Power Saving", 4},
       {"Hardware Test", Screen::HardwareTest, "Peripheral Test", "Play Melody", 7},
   };
   for (const auto &item : cases) {
@@ -1134,9 +1133,9 @@ TEST_CASE("UIManager: Portable Sleep toggle syncs and applies", "[UIManager][set
   settings.portable_sleep_enabled = true;
   ui.sync_settings(settings);
 
-  go_to_group(ui, "Operations");
+  go_to_group(ui, "Power Saving");
   auto values = ui.build_values(make_default_ctx());
-  CHECK(std::string(values.rows[6].text) == "Portable Sleep: On");
+  CHECK(std::string(values.rows[2].text) == "Portable Sleep: On");
 
   open_row(ui, "Portable Sleep:");
   const auto result = open_row(ui, "Off");

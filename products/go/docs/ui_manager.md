@@ -181,9 +181,9 @@ rows follow this order:
 |---|---|
 | Tracking | Status, Pause Tracking or Resume Tracking, Stop Tracking |
 | Settings | Operations, Display & Touch, Power Saving, Hardware Test, Clear Data, Setup Guide, About Device |
-| Operations | Measurement Interval, CO2 Calibration, GPS Mode, Buzzer, Portable Sleep |
+| Operations | Measurement Interval, CO2 Calibration, GPS Mode, Buzzer |
 | Display & Touch | Temperature Unit, Altitude Unit, PM Display, Auto Lock, AQI LED, Touch LED |
-| Power Saving | Wi-Fi Power Saving |
+| Power Saving | Portable Sleep, Wi-Fi Power Saving |
 | Hardware Test | Peripheral Test, GPS Test, Accelerometer Test, Battery Calibration, Play Melody |
 
 Settings and its groups fit on one page. Opening Settings selects Operations;

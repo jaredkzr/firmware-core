@@ -192,7 +192,7 @@ without waiting out the producer's boot warmup.
 
 ## Portable Sleep
 
-With `GoSettings::portable_sleep_enabled` (menu row **Portable Sleep**, BLE
+With `GoSettings::portable_sleep_enabled` (menu row **Settings → Power Saving → Portable Sleep**, BLE
 config key `"port_sleep"`, default off), a locked Portable device with no BLE
 central connected follows the same deep-sleep cycle as Offline mode:
 
