@@ -205,7 +205,7 @@ partition table, and merged factory-flash binary.
 - [`docs/fg_learning.md`](docs/fg_learning.md) — factory fuel-gauge learning
   boot path (`FgLearningRunner` / `FgLearningController` split, dashboard)
 - [`docs/hardware_test.md`](docs/hardware_test.md) — on-device Hardware Test
-  surface (Peripheral, GPS, Accelerometer, FG Learning arm)
+  surface (Peripheral, GPS, Accelerometer, Battery Calibration arm)
 - [`go_ble_client.md`](go_ble_client.md) — client-side BLE integration spec
   for mobile app developers (discovery, pairing, GATT, payloads, history)
 - [`specs/`](specs) — design specs and refactor plans (temporary; deleted

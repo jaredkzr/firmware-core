@@ -154,9 +154,17 @@ public:
   /// start_advertising(). Returns false on failure.
   bool init_stack_and_register(const char *serial);
 
-  /// Phase 3: set the advertised name + service UUID and start advertising.
+  /// Phase 3: set the name, service UUID and interval, then start advertising.
   /// Marks the service initialized. Returns false if advertising fails.
   bool start_advertising();
+
+  /// Advertise at the faster connect-window interval instead of the default
+  /// 500 ms. Portable Sleep wakes advertise for only BLE_WINDOW_ADVERTISE_MS,
+  /// too short for a phone to connect at 500 ms; the wake clears it once it
+  /// promotes to interactive. Applies on the next start_advertising(); while
+  /// advertising it restarts advertising at the new interval, and while a
+  /// client is connected it applies when advertising resumes.
+  void set_connect_window_advertising(bool enabled);
 
   /// Stop advertising, disconnect clients, tear down BLE stack.
   /// Safe to call when not initialized (no-op).
@@ -329,6 +337,12 @@ private:
   char _adv_name[BLE_ADV_NAME_BUF_SIZE] = {};
 
   std::atomic<bool> _connected{false};
+
+  // Advertising interval: wanted (set_connect_window_advertising()) and last
+  // configured on the server since init (0 = none).
+  bool _connect_window_advertising = false;
+  uint32_t _configured_interval_us = 0;
+  bool apply_advertising_interval();
 
   // Optional disconnect fan-out (OTA abort).  Invoked first in
   // on_disconnect(), synchronously on the NimBLE host task.  Nullable.

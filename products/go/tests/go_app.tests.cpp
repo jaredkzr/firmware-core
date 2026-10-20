@@ -111,6 +111,8 @@ extern int portable_ble_start_count;
 extern bool ble_connected;
 extern int ble_deinit_count;
 extern int ble_refresh_broadcast_count;
+/// set_connect_window_advertising() arguments, in call order.
+extern std::vector<bool> ble_connect_window_advertising;
 extern bool should_hold_pm_result;
 extern bool shutdown_called;
 extern bool power_on_reset;
@@ -1489,6 +1491,7 @@ TEST_CASE("run_ble_window_path: no phone goes back to sleep without touching the
 
   CHECK(test_spy::portable_ble_start_count == 1);
   CHECK(test_spy::ble_deinit_count == 1);
+  CHECK(test_spy::ble_connect_window_advertising == std::vector<bool>{true});
   CHECK_FALSE(test_spy::orchestrator_init_called);
   CHECK(board.isr_removed);
   const auto &log = board.call_log;
@@ -1518,6 +1521,8 @@ TEST_CASE("run_ble_window_path: a connected phone hands its BLE link to interact
   REQUIRE(handoff.portable_ble != nullptr);
   CHECK(test_spy::orchestrator_ble_service == handoff.portable_ble->ble);
   CHECK(test_spy::orchestrator_event_queue == handoff.portable_ble->event_queue);
+  // Fast interval for the window, back to the default once interactive.
+  CHECK(test_spy::ble_connect_window_advertising == std::vector<bool>{true, false});
   const auto &log = board.call_log;
   CHECK(std::find(log.begin(), log.end(), "ulp_stop") != log.end());
 }

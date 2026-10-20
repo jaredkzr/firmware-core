@@ -481,6 +481,7 @@ public:
   bool set_security(AgBleIoCapability, uint8_t) override { return true; }
   bool delete_all_bonds() override { return true; }
   AgBleGattService *add_service(const char *) override { return nullptr; }
+  bool set_advertising_interval(uint32_t) override { return true; }
   bool set_advertising_name(const char *) override { return true; }
   bool add_advertised_service_uuid(const char *) override { return true; }
   bool set_manufacturer_data(const uint8_t *, size_t) override { return true; }
@@ -6157,7 +6158,7 @@ TEST_CASE("on_input: Hardware Test FG Learning arm writes factory state",
   enter_hardware_test(f, orch);
   REQUIRE(f.ui_manager.current_screen() == Screen::HardwareTest);
 
-  open_ui_row(f, orch, "Fuel Gauge Learning");
+  open_ui_row(f, orch, "Battery Calibration");
   REQUIRE(f.ui_manager.current_screen() == Screen::Confirm);
 
   // Navigate to Yes (index 4): 3 downs from Back (1).

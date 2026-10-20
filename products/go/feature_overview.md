@@ -58,12 +58,13 @@ and connectivity features are active.
 
 The default mode on a fresh device is Portable.
 
-Portable mode has an optional **Portable Sleep** setting (off by default). When
-it is on and no phone is connected, the locked device sleeps between
-measurements to save battery. It wakes briefly every 10 seconds to advertise
-over BLE, so the paired phone can still connect; a connection keeps it awake
-and streaming live readings as usual. Pressing the power button also wakes and
-unlocks it. TVOC and NOx indexes keep working across sleeps.
+Portable mode has an optional **Portable Sleep** setting (Settings → Power
+Saving, off by default). When it is on and no phone is connected, the locked
+device sleeps between measurements to save battery. It wakes briefly every 10
+seconds to advertise over BLE, so the paired phone can still connect; a
+connection keeps it awake and streaming live readings as usual. Pressing the
+power button also wakes and unlocks it. TVOC and NOx indexes keep working
+across sleeps.
 
 ## Tracking And Route Logging
 

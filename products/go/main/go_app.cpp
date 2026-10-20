@@ -435,6 +435,8 @@ PortableBle *GoApp::start_portable_ble(StorageService &storage) {
   bundle->provisioner = new PortableWifiProvisioner(
       bundle->event_queue, {_board.wifi_manager(), _board.ble_server(), _board},
       make_portable_prov_config(serial->c_str(), firmware_version));
+  // These wakes advertise briefly, so a phone needs the faster interval.
+  bundle->ble->set_connect_window_advertising(true);
   if (!start_portable_ble_services(*bundle->ble, *bundle->provisioner, *bundle->ota,
                                    serial->c_str())) {
     AG_LOGW(TAG, "portable BLE not started before interactive");
@@ -1121,6 +1123,10 @@ void GoApp::run_interactive(WakeCause cause, BootHandoff handoff) {
   // enforced mutual exclusion.
   auto *ble_service = early_ble != nullptr ? early_ble->ble
                                            : new BleService(event_queue, stor, _board.ble_server());
+  if (early_ble != nullptr) {
+    // The Go now stays awake, so it can advertise at the slower interval.
+    ble_service->set_connect_window_advertising(false);
+  }
 
   // --- WifiService ---
   auto *stationary_strings = new StationaryStrings(make_stationary_strings(serial));

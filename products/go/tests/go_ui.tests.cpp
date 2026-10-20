@@ -141,24 +141,26 @@ TEST_CASE("UIManager: agreed menu hierarchy", "[UIManager][nav][redesign]") {
   double_press(ui);
   CHECK(ui.build_values(make_default_ctx()).selected_row == 2);
   open_row(ui, "Settings");
-  check_rows(ui, {"Exit", "Back", "Operations", "Display & Touch", "Hardware Test", "Clear Data",
-                  "Setup Guide", "About Device"});
+  check_rows(ui, {"Exit", "Back", "Operations", "Display & Touch", "Power Saving", "Hardware Test",
+                  "Clear Data", "Setup Guide", "About Device"});
   open_row(ui, "Operations");
   auto values = ui.build_values(make_default_ctx());
-  REQUIRE(values.row_count == 7);
+  REQUIRE(values.row_count == 6);
   CHECK(std::string(values.rows[2].text).rfind("Measure Int.: ", 0) == 0);
   CHECK(std::string(values.rows[3].text) == "CO2 Calibration");
   CHECK(std::string(values.rows[4].text) == "GPS: When tracking");
   CHECK(std::string(values.rows[5].text) == "Buzzer: Off");
-  CHECK(std::string(values.rows[6].text) == "Portable Sleep: Off");
   double_press(ui);
   open_row(ui, "Display & Touch");
   check_rows(ui, {"Exit", "Back", "Temperature Unit: C", "Altitude Unit: m", "PM Display: ug/m3",
                   "Auto Lock: Off", "AQI LED: Off", "Touch LED: Off"});
   double_press(ui);
+  open_row(ui, "Power Saving");
+  check_rows(ui, {"Exit", "Back", "Portable Sleep: Off", "Wi-Fi Power Saving"});
+  double_press(ui);
   open_row(ui, "Hardware Test");
   check_rows(ui, {"Exit", "Back", "Peripheral Test", "GPS Test", "Accelerometer Test",
-                  "Fuel Gauge Learning", "Play Melody"});
+                  "Battery Calibration", "Play Melody"});
 }
 
 TEST_CASE("UIManager: mode choices preserve identities across every transition",
@@ -199,9 +201,10 @@ TEST_CASE("UIManager: group choice returns and exit gestures", "[UIManager][nav]
       {"Operations", "Measure Int.", "10s", Screen::Operations},
       {"Operations", "GPS:", "Always On", Screen::Operations},
       {"Operations", "Buzzer:", "On", Screen::Operations},
-      {"Operations", "Portable Sleep:", "On", Screen::Operations},
       {"Display & Touch", "PM Display:", "USAQI", Screen::DisplayTouch},
       {"Display & Touch", "Auto Lock:", "60 Seconds", Screen::DisplayTouch},
+      {"Power Saving", "Portable Sleep:", "On", Screen::PowerSaving},
+      {"Power Saving", "Wi-Fi Power Saving", "Enable", Screen::PowerSaving},
   };
   for (const auto &choice : choices) {
     DYNAMIC_SECTION(choice.setting) {
@@ -248,7 +251,7 @@ TEST_CASE("UIManager: group summaries fit the current list font",
           "[UIManager][settings][display]") {
   // 128 px canvas, 10 px text inset, and 6 px per character.
   static constexpr size_t MAX_VISIBLE_LABEL_CHARS = 19;
-  for (const char *group : {"Operations", "Display & Touch", "Hardware Test"}) {
+  for (const char *group : {"Operations", "Display & Touch", "Power Saving", "Hardware Test"}) {
     UIManager ui(DEFAULT_UI_CONFIG);
     GoSettings settings{};
     settings.measure_interval_seconds = 3599;
@@ -353,7 +356,8 @@ TEST_CASE("UIManager: Getting Started via Settings -> Setup Guide", "[UIManager]
     CHECK(result.action == UIAction::None);
     CHECK(ui.current_screen() == Screen::Settings);
     v = ui.build_values(ctx);
-    CHECK(v.selected_row == 6); // Setup Guide row
+    REQUIRE(v.selected_row < v.row_count);
+    CHECK(std::string(v.rows[v.selected_row].text) == "Setup Guide");
   }
 }
 
@@ -398,9 +402,10 @@ TEST_CASE("UIManager: grouped menus wrap and return to their parent",
     uint8_t count;
   };
   const MenuCase cases[] = {
-      {nullptr, Screen::Settings, "Operations", "About Device", 8},
-      {"Operations", Screen::Operations, "Measure Int.", "Portable Sleep: Off", 7},
+      {nullptr, Screen::Settings, "Operations", "About Device", 9},
+      {"Operations", Screen::Operations, "Measure Int.", "Buzzer: Off", 6},
       {"Display & Touch", Screen::DisplayTouch, "Temperature Unit: C", "Touch LED: Off", 8},
+      {"Power Saving", Screen::PowerSaving, "Portable Sleep: Off", "Wi-Fi Power Saving", 4},
       {"Hardware Test", Screen::HardwareTest, "Peripheral Test", "Play Melody", 7},
   };
   for (const auto &item : cases) {
@@ -1128,9 +1133,9 @@ TEST_CASE("UIManager: Portable Sleep toggle syncs and applies", "[UIManager][set
   settings.portable_sleep_enabled = true;
   ui.sync_settings(settings);
 
-  go_to_group(ui, "Operations");
+  go_to_group(ui, "Power Saving");
   auto values = ui.build_values(make_default_ctx());
-  CHECK(std::string(values.rows[6].text) == "Portable Sleep: On");
+  CHECK(std::string(values.rows[2].text) == "Portable Sleep: On");
 
   open_row(ui, "Portable Sleep:");
   const auto result = open_row(ui, "Off");
@@ -1751,7 +1756,7 @@ TEST_CASE("UIManager: Hardware Test submenu navigation", "[UIManager][hwtest]") 
     CHECK(std::string(v.rows[2].text) == "Peripheral Test");
     CHECK(std::string(v.rows[3].text) == "GPS Test");
     CHECK(std::string(v.rows[4].text) == "Accelerometer Test");
-    CHECK(std::string(v.rows[5].text) == "Fuel Gauge Learning");
+    CHECK(std::string(v.rows[5].text) == "Battery Calibration");
     CHECK(std::string(v.rows[6].text) == "Play Melody");
     CHECK(v.row_count == 7);
   }
@@ -1778,7 +1783,7 @@ TEST_CASE("UIManager: FG Learning arm confirm dialog", "[UIManager][hwtest][fg]"
 
   auto navigate_to_fg_confirm = [&]() {
     go_to_group(ui, "Hardware Test");
-    open_row(ui, "Fuel Gauge Learning");
+    open_row(ui, "Battery Calibration");
   };
 
   SECTION("FG Learning row opens the confirm dialog with a strong question") {
@@ -1787,7 +1792,7 @@ TEST_CASE("UIManager: FG Learning arm confirm dialog", "[UIManager][hwtest][fg]"
 
     auto ctx = make_default_ctx();
     DisplayValues v = ui.build_values(ctx);
-    CHECK(std::string(v.rows[2].text) == "Start FG Learning?");
+    CHECK(std::string(v.rows[2].text) == "Start Battery Calibration?");
     CHECK(v.rows[2].disabled == true);
   }
 
@@ -1810,7 +1815,7 @@ TEST_CASE("UIManager: FG Learning arm confirm dialog", "[UIManager][hwtest][fg]"
     CHECK(ui.current_screen() == Screen::HardwareTest);
     auto ctx = make_default_ctx();
     DisplayValues v = ui.build_values(ctx);
-    CHECK(std::string(v.rows[v.selected_row].text) == "Fuel Gauge Learning");
+    CHECK(std::string(v.rows[v.selected_row].text) == "Battery Calibration");
   }
 
   SECTION("Back returns to the Hardware Test submenu") {
